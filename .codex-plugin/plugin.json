@@ -1,0 +1,39 @@
+{
+  "name": "codex-hud",
+  "version": "0.1.0",
+  "description": "A local terminal HUD for Codex CLI subscription limit remaining usage.",
+  "author": {
+    "name": "GiantDrawf",
+    "email": "971790583@qq.com",
+    "url": "https://github.com/GiantDrawf"
+  },
+  "homepage": "local",
+  "repository": "local",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "hud",
+    "usage",
+    "tokens",
+    "rate-limits"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex HUD",
+    "shortDescription": "实时查看 Codex CLI 订阅限额剩余量",
+    "longDescription": "Codex HUD reads local Codex telemetry to render a terminal dashboard for remaining 5-hour and weekly Codex subscription limits. It is inspired by claude-hud, but this local implementation uses Codex's local telemetry files and runs as a standalone terminal HUD.",
+    "developerName": "GiantDrawf",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Interactive"
+    ],
+    "websiteURL": "local",
+    "defaultPrompt": [
+      "启动 Codex HUD 实时用量面板",
+      "查看当前 Codex 剩余额度",
+      "解释 Codex HUD 显示的字段"
+    ],
+    "brandColor": "#0F766E"
+  }
+}
