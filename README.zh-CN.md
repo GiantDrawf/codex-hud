@@ -1,5 +1,7 @@
 # Codex HUD
 
+[English](./README.md) | 简体中文
+
 Codex HUD 是一个本地终端用量面板，用来查看 Codex CLI 订阅限额的剩余额度。
 
 它的交互形式参考了 `claude-hud`，但实现方式不同：当前版本不会修改 Codex CLI，也不会请求官网接口，只读取本机 Codex CLI 已经写入的本地 telemetry 文件。

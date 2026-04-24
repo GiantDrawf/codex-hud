@@ -1,5 +1,7 @@
 # Codex HUD
 
+English | [简体中文](./README.zh-CN.md)
+
 A local terminal HUD for Codex CLI subscription-limit remaining usage, inspired by `claude-hud`.
 
 Codex currently exposes useful usage data in local files rather than a Claude-style statusline API. This plugin reads the latest local `token_count.rate_limits` event from:
