@@ -9,6 +9,7 @@ import glob
 import json
 import os
 import re
+import signal
 import shutil
 import sqlite3
 import sys
@@ -20,6 +21,9 @@ from typing import Any
 
 
 DEFAULT_CODEX_HOME = Path.home() / ".codex"
+READ_CHUNK_BYTES = 2_000_000
+MAX_TOKEN_COUNT_SCAN_BYTES = 20_000_000
+STALE_AFTER_SECONDS = 120
 
 
 @dataclass
@@ -38,6 +42,7 @@ class Snapshot:
     limit_reached: str | None
     updated_at: dt.datetime
     source_updated_at: dt.datetime | None
+    available: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a terminal HUD")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     parser.add_argument("--status-line", action="store_true", help="Print compact one-line status output")
-    parser.add_argument("--tmux-line", action="store_true", help="Alias for --status-line")
+    parser.add_argument("--tmux-line", action="store_true", help="Deprecated alias for --status-line")
     parser.add_argument("--no-clear", action="store_true", help="Compatibility flag for status-line integrations")
     return parser.parse_args()
 
@@ -103,11 +108,22 @@ def read_latest_token_count(session_path: Path | None) -> dict[str, Any] | None:
         with session_path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            handle.seek(max(0, size - 2_000_000))
-            chunk = handle.read().decode("utf-8", errors="replace")
+            scanned = 0
+            while scanned < min(size, MAX_TOKEN_COUNT_SCAN_BYTES):
+                read_size = min(READ_CHUNK_BYTES, size - scanned)
+                offset = max(0, size - scanned - read_size)
+                handle.seek(offset)
+                chunk = handle.read(read_size).decode("utf-8", errors="replace")
+                token_count = parse_latest_token_count_chunk(chunk, session_path)
+                if token_count:
+                    return token_count
+                scanned += read_size
     except OSError:
         return None
+    return None
 
+
+def parse_latest_token_count_chunk(chunk: str, session_path: Path) -> dict[str, Any] | None:
     for line in reversed(chunk.splitlines()):
         if '"type":"token_count"' not in line and '"type": "token_count"' not in line:
             continue
@@ -117,8 +133,27 @@ def read_latest_token_count(session_path: Path | None) -> dict[str, Any] | None:
             continue
         payload = event.get("payload") or {}
         if payload.get("type") == "token_count":
+            payload["_codex_hud_source_updated_at"] = event_timestamp(event) or file_mtime(session_path)
             return payload
     return None
+
+
+def event_timestamp(event: dict[str, Any]) -> dt.datetime | None:
+    raw = event.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone()
+
+
+def file_mtime(path: Path) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+    except OSError:
+        return None
 
 
 def read_latest_token_count_anywhere(codex_home: Path, session_path: Path | None = None) -> dict[str, Any] | None:
@@ -152,6 +187,7 @@ def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -
             limit_reached=previous.limit_reached,
             updated_at=dt.datetime.now(),
             source_updated_at=previous.source_updated_at,
+            available=False,
         )
     return Snapshot(
         primary=rate_window_from_dict(limits.get("primary")),
@@ -160,7 +196,8 @@ def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -
         limit_id=limits.get("limit_id"),
         limit_reached=limits.get("rate_limit_reached_type"),
         updated_at=dt.datetime.now(),
-        source_updated_at=dt.datetime.now() if limits else None,
+        source_updated_at=token_count.get("_codex_hud_source_updated_at") if limits else None,
+        available=bool(limits),
     )
 
 
@@ -175,7 +212,10 @@ def colorize(text: str, color: str, enabled: bool) -> str:
     if not enabled:
         return text
     codes = {"dim": "2", "green": "32", "yellow": "33", "red": "31", "cyan": "36", "bold": "1"}
-    return f"\033[{codes[color]}m{text}\033[0m"
+    code = codes.get(color)
+    if not code:
+        return text
+    return f"\033[{code}m{text}\033[0m"
 
 
 def render(snapshot: Snapshot, use_color: bool) -> str:
@@ -185,8 +225,13 @@ def render(snapshot: Snapshot, use_color: bool) -> str:
     updated = snapshot.updated_at.strftime("%Y-%m-%d %H:%M:%S")
     lines.append(colorize(f"{title}  Usage Remaining", "bold", use_color))
     if snapshot.source_updated_at:
-        source_time = snapshot.source_updated_at.strftime("%H:%M:%S")
-        lines.append(colorize(f"Updated {updated}  |  Source {source_time}", "dim", use_color))
+        source_text = snapshot.source_updated_at.strftime("%Y-%m-%d %H:%M:%S")
+        stale_seconds = max(0, int((snapshot.updated_at - snapshot.source_updated_at.replace(tzinfo=None)).total_seconds()))
+        if stale_seconds > STALE_AFTER_SECONDS:
+            stale_text = format_duration(stale_seconds)
+            lines.append(colorize(f"Updated {updated}  |  Source {source_text}  |  stale for {stale_text}", "yellow", use_color))
+        else:
+            lines.append(colorize(f"Updated {updated}  |  Source {source_text}", "dim", use_color))
     else:
         lines.append(colorize(f"Updated {updated}  |  waiting for Codex limit telemetry", "yellow", use_color))
 
@@ -210,7 +255,7 @@ def render(snapshot: Snapshot, use_color: bool) -> str:
 def render_status_line(snapshot: Snapshot) -> str:
     primary_remaining = remaining_text(snapshot.primary)
     secondary_remaining = remaining_text(snapshot.secondary)
-    primary_reset = reset_datetime_text(snapshot.primary.resets_at, include_date=False)
+    primary_reset = reset_datetime_text(snapshot.primary.resets_at, include_date=reset_is_not_today(snapshot.primary.resets_at))
     secondary_reset = reset_datetime_text(snapshot.secondary.resets_at, include_date=True)
     return (
         f"HUD • 5h {primary_remaining} left reset {primary_reset} "
@@ -272,6 +317,7 @@ def framed_line(text: str, width: int) -> str:
 
 
 def pad_display(text: str, width: int) -> str:
+    text = strip_ansi(text)
     display = display_width(text)
     if display >= width:
         return truncate_display(text, width)
@@ -291,9 +337,14 @@ def truncate_display(text: str, width: int) -> str:
 
 
 def display_width(text: str) -> int:
+    text = strip_ansi(text)
     total = 0
     for char in text:
-        if unicodedata.combining(char):
+        codepoint = ord(char)
+        if unicodedata.combining(char) or unicodedata.category(char) in {"Cf", "Cc"}:
+            continue
+        if codepoint >= 0x1F000:
+            total += 2
             continue
         total += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
     return total
@@ -319,10 +370,25 @@ def remaining_color(remaining: float) -> str:
 def reset_datetime_text(ts: int | None, include_date: bool) -> str:
     if not ts:
         return "-"
-    value = dt.datetime.fromtimestamp(ts)
+    value = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone()
     if include_date:
         return f"{value.year}年{value.month}月{value.day}日 {value:%H:%M}"
     return value.strftime("%H:%M")
+
+
+def reset_is_not_today(ts: int | None) -> bool:
+    if not ts:
+        return False
+    value = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone()
+    return value.date() != dt.datetime.now().astimezone().date()
+
+
+def format_duration(seconds: int) -> str:
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, rem_minutes = divmod(minutes, 60)
+    return f"{hours}h {rem_minutes}m"
 
 
 def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
@@ -342,12 +408,14 @@ def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
         "plan_type": snapshot.plan_type,
         "limit_id": snapshot.limit_id,
         "limit_reached": snapshot.limit_reached,
+        "available": snapshot.available,
         "updated_at": snapshot.updated_at.isoformat(),
         "source_updated_at": snapshot.source_updated_at.isoformat() if snapshot.source_updated_at else None,
     }
 
 
 def main() -> int:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     args = parse_args()
     use_color = not args.no_color and sys.stdout.isatty()
     previous_snapshot = None

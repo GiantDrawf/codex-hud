@@ -19,7 +19,7 @@ HUD 只展示两类订阅限额：
 
 ```text
 Codex HUD  Usage Remaining
-Updated 2026-04-24 15:08:31  |  Source 15:08:31
+Updated 2026-04-24 15:08:31  |  Source 2026-04-24 15:08:31
 
 ┌────────────────────────────────────┐  ┌────────────────────────────────────┐
 │ 5 小时使用限额                     │  │ 每周使用限额                       │
@@ -44,7 +44,7 @@ codex-hud
 如果没有配置 alias，也可以直接运行：
 
 ```bash
-python3 ~/plugins/codex-hud/scripts/codex_hud.py
+~/plugins/codex-hud/scripts/codex-hud
 ```
 
 只输出一次：
@@ -79,6 +79,12 @@ alias codex-hud="$HOME/plugins/codex-hud/scripts/codex-hud"
 source ~/.zshrc
 ```
 
+如果通过 zip/tar 安装后丢失了可执行位，执行：
+
+```bash
+chmod +x ~/plugins/codex-hud/scripts/codex-hud ~/plugins/codex-hud/scripts/codex_hud.py
+```
+
 ## 数据来源
 
 Codex HUD 读取以下本地文件：
@@ -98,6 +104,7 @@ Codex HUD 读取以下本地文件：
 - 官网 analytics 页面可能比本地 HUD 更早看到服务端最新统计。
 - 如果你在网页版、其他设备或其他 Codex 会话中消耗额度，本地 HUD 通常要等当前 Codex CLI 下次收到 telemetry 后才会同步。
 - watch 模式会保留最后一次有效数据，避免临时读取失败时清空界面。
+- 如果最后一次源数据超过 2 分钟没有更新，标题区域会标记为 stale。
 
 ## 安全性
 

@@ -4,8 +4,10 @@ __pycache__/
 .env
 .env.*
 *.log
+# Local Codex telemetry/database files should not be committed.
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
 dist/
 node_modules/
+CODE_REVIEW.md

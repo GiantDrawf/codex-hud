@@ -10,13 +10,13 @@ This plugin provides a local terminal dashboard for remaining Codex subscription
 ## Commands
 
 - One-time snapshot:
-  `python3 ~/plugins/codex-hud/scripts/codex_hud.py --once`
+  `~/plugins/codex-hud/scripts/codex-hud --once`
 - Live HUD:
-  `python3 ~/plugins/codex-hud/scripts/codex_hud.py`
+  `~/plugins/codex-hud/scripts/codex-hud`
 - Compact status line:
-  `python3 ~/plugins/codex-hud/scripts/codex_hud.py --status-line --once --no-clear`
+  `~/plugins/codex-hud/scripts/codex-hud --status-line --once --no-clear`
 - JSON output:
-  `python3 ~/plugins/codex-hud/scripts/codex_hud.py --once --json`
+  `~/plugins/codex-hud/scripts/codex-hud --once --json`
 
 ## What It Reads
 

@@ -4,11 +4,11 @@
   "description": "A local terminal HUD for Codex CLI subscription limit remaining usage.",
   "author": {
     "name": "GiantDrawf",
-    "email": "971790583@qq.com",
+    "email": "GiantDrawf@users.noreply.github.com",
     "url": "https://github.com/GiantDrawf"
   },
-  "homepage": "local",
-  "repository": "local",
+  "homepage": "https://github.com/GiantDrawf/codex-hud",
+  "repository": "https://github.com/GiantDrawf/codex-hud",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -28,7 +28,7 @@
       "Read",
       "Interactive"
     ],
-    "websiteURL": "local",
+    "websiteURL": "https://github.com/GiantDrawf/codex-hud",
     "defaultPrompt": [
       "启动 Codex HUD 实时用量面板",
       "查看当前 Codex 剩余额度",
