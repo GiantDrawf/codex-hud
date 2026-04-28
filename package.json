@@ -1,0 +1,13 @@
+{
+  "name": "codex-hud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codex-hud": "./scripts/codex-hud"
+  },
+  "dependencies": {
+    "ink": "^6.5.1",
+    "react": "^19.2.3"
+  }
+}

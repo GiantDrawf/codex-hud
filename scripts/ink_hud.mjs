@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+
+import React, {useCallback, useEffect, useState} from 'react';
+import {Box, Text, render, useApp, useInput, useStdin, useStdout} from 'ink';
+import {execFile} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+
+const h = React.createElement;
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const pythonBackend = path.join(scriptDir, 'codex_hud.py');
+
+function parseArgs(argv) {
+	const args = {
+		interval: 1,
+		inkOnce: false,
+		backendArgs: []
+	};
+
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (arg === '--interval' && argv[index + 1]) {
+			args.interval = Number.parseFloat(argv[index + 1]) || 1;
+			index += 1;
+			continue;
+		}
+		if (arg.startsWith('--interval=')) {
+			args.interval = Number.parseFloat(arg.slice('--interval='.length)) || 1;
+			continue;
+		}
+		if (arg === '--ink-once') {
+			args.inkOnce = true;
+			continue;
+		}
+		args.backendArgs.push(arg);
+		if ((arg === '--codex-home' || arg === '--session') && argv[index + 1]) {
+			args.backendArgs.push(argv[index + 1]);
+			index += 1;
+		}
+	}
+
+	return args;
+}
+
+function loadSnapshot(backendArgs) {
+	return new Promise((resolve, reject) => {
+		execFile(
+			'python3',
+			[pythonBackend, '--once', '--json', ...backendArgs],
+			{timeout: 5000, maxBuffer: 1024 * 1024},
+			(error, stdout, stderr) => {
+				if (error) {
+					reject(new Error((stderr || error.message).trim()));
+					return;
+				}
+				try {
+					resolve(JSON.parse(stdout));
+				} catch (parseError) {
+					reject(parseError);
+				}
+			}
+		);
+	});
+}
+
+function percent(value, digits = 0) {
+	if (value === null || value === undefined) {
+		return '?';
+	}
+	return `${Number(value).toFixed(digits)}%`;
+}
+
+function resetText(timestamp, includeDate) {
+	if (!timestamp) {
+		return '-';
+	}
+	const value = new Date(timestamp * 1000);
+	const hour = String(value.getHours()).padStart(2, '0');
+	const minute = String(value.getMinutes()).padStart(2, '0');
+	if (!includeDate) {
+		return `${hour}:${minute}`;
+	}
+	return `${value.getFullYear()}年${value.getMonth() + 1}月${value.getDate()}日 ${hour}:${minute}`;
+}
+
+function isNotToday(timestamp) {
+	if (!timestamp) {
+		return false;
+	}
+	const value = new Date(timestamp * 1000);
+	const now = new Date();
+	return value.toDateString() !== now.toDateString();
+}
+
+function bar(remaining, width = 20) {
+	if (remaining === null || remaining === undefined) {
+		return '-'.repeat(width);
+	}
+	const filled = Math.max(0, Math.min(width, Math.round(width * remaining / 100)));
+	return '■'.repeat(filled) + '·'.repeat(width - filled);
+}
+
+function remainingColor(remaining) {
+	if (remaining === null || remaining === undefined) {
+		return 'yellow';
+	}
+	if (remaining >= 30) {
+		return 'green';
+	}
+	if (remaining >= 10) {
+		return 'yellow';
+	}
+	return 'red';
+}
+
+function freshness(snapshot) {
+	if (!snapshot?.source_updated_at) {
+		return 'waiting for Codex limit telemetry';
+	}
+	if (snapshot.is_stale) {
+		return `source stale ${snapshot.source_stale_seconds ?? '?'}s`;
+	}
+	return `source ${new Date(snapshot.source_updated_at).toLocaleString()}`;
+}
+
+function LimitCard({title, subtitle, window, weekly}) {
+	const used = window?.used_percent;
+	const remaining = window?.remaining_percent;
+	const color = remainingColor(remaining);
+	const reset = resetText(window?.resets_at, weekly || isNotToday(window?.resets_at));
+
+	return h(
+		Box,
+		{borderStyle: 'round', borderColor: color, paddingX: 1, width: 38, flexDirection: 'column'},
+		h(Text, {bold: true}, title),
+		h(Text, {dimColor: true}, subtitle),
+		h(Box, {height: 1}),
+		h(Text, {color}, `已用：${percent(used)}`),
+		h(Text, {color}, `剩余：${percent(remaining)}`),
+		h(Text, {color}, bar(remaining)),
+		h(Text, null, `重置时间：${reset}`)
+	);
+}
+
+function Hud({args}) {
+	const {exit} = useApp();
+	const {isRawModeSupported} = useStdin();
+	const {stdout} = useStdout();
+	const [snapshot, setSnapshot] = useState(null);
+	const [error, setError] = useState(null);
+
+	useInput((input, key) => {
+		if (input === 'q' || key.escape) {
+			exit();
+		}
+	}, {isActive: Boolean(isRawModeSupported)});
+
+	const refresh = useCallback(async () => {
+		try {
+			const next = await loadSnapshot(args.backendArgs);
+			setSnapshot(next);
+			setError(null);
+			if (args.inkOnce) {
+				setTimeout(exit, 50);
+			}
+		} catch (loadError) {
+			setError(loadError.message);
+			if (args.inkOnce) {
+				setTimeout(exit, 50);
+			}
+		}
+	}, [args.backendArgs, args.inkOnce, exit]);
+
+	useEffect(() => {
+		let cancelled = false;
+		let running = false;
+		const tick = async () => {
+			if (running || cancelled) {
+				return;
+			}
+			running = true;
+			await refresh();
+			running = false;
+		};
+		tick();
+		const timer = setInterval(tick, Math.max(200, args.interval * 1000));
+		return () => {
+			cancelled = true;
+			clearInterval(timer);
+		};
+	}, [args.interval, refresh]);
+
+	const wide = (stdout?.columns || 80) >= 82;
+	const updated = snapshot ? new Date(snapshot.updated_at).toLocaleString() : '-';
+	return h(
+		Box,
+		{flexDirection: 'column'},
+		h(Text, {bold: true}, 'Codex HUD  Usage Remaining'),
+		h(Text, {dimColor: !snapshot, color: error ? 'yellow' : undefined}, error || `updated ${updated} | ${freshness(snapshot)}`),
+		h(Box, {height: 1}),
+		snapshot
+			? h(
+				Box,
+				{flexDirection: wide ? 'row' : 'column', gap: 2},
+				h(LimitCard, {title: '5 小时使用限额', subtitle: '滚动窗口', window: snapshot.primary, weekly: false}),
+				h(LimitCard, {title: '每周使用限额', subtitle: '订阅周期', window: snapshot.secondary, weekly: true})
+			)
+			: h(Text, {color: 'yellow'}, 'loading usage snapshot...'),
+		snapshot && h(Box, {height: 1}),
+		snapshot && h(Text, {dimColor: true}, `Plan: ${snapshot.plan_type || '-'} | limit: ${snapshot.limit_id || '-'} | reached: ${snapshot.limit_reached || 'no'} | q to quit`)
+	);
+}
+
+const args = parseArgs(process.argv.slice(2));
+render(h(Hud, {args}), {exitOnCtrlC: true});

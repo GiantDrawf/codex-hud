@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live local usage HUD for Codex CLI."""
+"""Local usage snapshot backend for Codex HUD."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import glob
 import json
 import os
 import re
-import signal
 import shutil
 import sqlite3
 import sys
@@ -46,10 +45,10 @@ class Snapshot:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Codex CLI live usage HUD")
+    parser = argparse.ArgumentParser(description="Codex CLI usage snapshot backend")
     parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME)
     parser.add_argument("--session", type=Path, help="Optional rollout JSONL session file to read limits from")
-    parser.add_argument("--interval", type=float, default=1.0, help="Refresh interval in seconds")
+    parser.add_argument("--interval", type=float, default=1.0, help="Compatibility flag; ignored by the snapshot backend")
     parser.add_argument("--once", action="store_true", help="Print one snapshot and exit")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a terminal HUD")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
@@ -160,6 +159,11 @@ def read_latest_token_count_anywhere(codex_home: Path, session_path: Path | None
     if session_path:
         return read_latest_token_count(session_path)
 
+    candidates = []
+    log_token_count = read_latest_rate_limits_from_logs(codex_home)
+    if log_token_count and log_token_count.get("rate_limits"):
+        candidates.append(log_token_count)
+
     pattern = str(codex_home / "sessions" / "**" / "rollout-*.jsonl")
     paths = [Path(path) for path in glob.glob(pattern, recursive=True)]
     existing_paths = [path for path in paths if path.exists()]
@@ -168,12 +172,24 @@ def read_latest_token_count_anywhere(codex_home: Path, session_path: Path | None
     for path in existing_paths[:20]:
         token_count = read_latest_token_count(path)
         if token_count and token_count.get("rate_limits"):
-            return token_count
+            candidates.append(token_count)
+            break
+
     state_path = newest_session_from_state(codex_home)
     token_count = read_latest_token_count(state_path)
     if token_count and token_count.get("rate_limits"):
-        return token_count
-    return read_latest_rate_limits_from_logs(codex_home)
+        candidates.append(token_count)
+
+    if not candidates:
+        return None
+    return max(candidates, key=token_count_source_ts)
+
+
+def token_count_source_ts(token_count: dict[str, Any]) -> float:
+    source = token_count.get("_codex_hud_source_updated_at")
+    if isinstance(source, dt.datetime):
+        return source.timestamp()
+    return 0.0
 
 
 def read_latest_rate_limits_from_logs(codex_home: Path) -> dict[str, Any] | None:
@@ -182,20 +198,24 @@ def read_latest_rate_limits_from_logs(codex_home: Path) -> dict[str, Any] | None
         return None
 
     query = """
-        SELECT ts, feedback_log_body
+        SELECT ts, target, feedback_log_body
         FROM logs
-        WHERE feedback_log_body LIKE '%"type":"codex.rate_limits"%'
-          AND target LIKE 'codex_api::%'
+        WHERE ts >= ?
+          AND (
+            feedback_log_body LIKE '%websocket event: {"type":"codex.rate_limits"%'
+            OR feedback_log_body LIKE 'Received message {"type":"codex.rate_limits"%'
+          )
         ORDER BY ts DESC, ts_nanos DESC, id DESC
-        LIMIT 100
+        LIMIT 50
     """
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.2) as conn:
-            rows = conn.execute(query).fetchall()
+            cutoff = int(time.time()) - 24 * 60 * 60
+            rows = conn.execute(query, (cutoff,)).fetchall()
     except sqlite3.Error:
         return None
 
-    for ts, body in rows:
+    for ts, _target, body in rows:
         event = extract_rate_limits_event(body or "")
         if not event:
             continue
@@ -211,8 +231,17 @@ def read_latest_rate_limits_from_logs(codex_home: Path) -> dict[str, Any] | None
 
 
 def extract_rate_limits_event(body: str) -> dict[str, Any] | None:
+    prefixes = ('websocket event: {"type":"codex.rate_limits"', 'Received message {"type":"codex.rate_limits"')
+    prefix_start = -1
+    for prefix in prefixes:
+        prefix_start = body.find(prefix)
+        if prefix_start >= 0:
+            break
+    if prefix_start < 0:
+        return None
+
     marker = '{"type":"codex.rate_limits"'
-    start = body.find(marker)
+    start = body.find(marker, prefix_start)
     if start < 0:
         return None
 
@@ -368,23 +397,26 @@ def limit_card(label: str, subtitle: str, window: RateWindow, weekly: bool, use_
     card_width = 38
     inner_width = card_width - 4
     if window.used_percent is None:
-        percent_text = "未知"
+        usage_line = "已用：未知"
+        remaining_line = "剩余：未知"
         bar_text = bar(None, 22)
         reset = "-"
         color = "yellow"
     else:
+        used = max(0.0, min(100.0, window.used_percent))
         remaining = max(0.0, min(100.0, 100.0 - window.used_percent))
-        percent_text = f"{remaining:.0f}%"
+        usage_line = f"已用：{used:.0f}%"
+        remaining_line = f"剩余：{remaining:.0f}%"
         bar_text = quota_bar(remaining, 22)
         reset = reset_datetime_text(window.resets_at, weekly)
         color = remaining_color(remaining)
-    usage_text = "剩余额度"
     raw_lines = [
         f"┌{'─' * (card_width - 2)}┐",
         framed_line(label, inner_width),
         framed_line(subtitle, inner_width),
         framed_line("", inner_width),
-        framed_line(f"{percent_text} {usage_text}", inner_width),
+        framed_line(usage_line, inner_width),
+        framed_line(remaining_line, inner_width),
         framed_line(bar_text, inner_width),
         framed_line(f"重置时间：{reset}", inner_width),
         f"└{'─' * (card_width - 2)}┘",
@@ -393,7 +425,7 @@ def limit_card(label: str, subtitle: str, window: RateWindow, weekly: bool, use_
     for index, line in enumerate(raw_lines):
         if index == 1:
             colored.append(colorize(line, "bold", use_color))
-        elif index == 4:
+        elif index in {4, 5}:
             colored.append(colorize(line, color, use_color))
         else:
             colored.append(line)
@@ -532,25 +564,16 @@ def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
 
 
 def main() -> int:
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     args = parse_args()
     use_color = not args.no_color and sys.stdout.isatty()
-    previous_snapshot = None
-    while True:
-        snapshot = build_snapshot(args, previous_snapshot)
-        if snapshot.primary.used_percent is not None or snapshot.secondary.used_percent is not None:
-            previous_snapshot = snapshot
-        if args.json:
-            print(json.dumps(snapshot_to_json(snapshot), ensure_ascii=False, indent=2))
-        elif args.status_line or args.tmux_line:
-            print(render_status_line(snapshot))
-        else:
-            if not args.once:
-                print("\033[2J\033[H", end="")
-            print(render(snapshot, use_color))
-        if args.once:
-            return 0
-        time.sleep(max(0.2, args.interval))
+    snapshot = build_snapshot(args)
+    if args.json:
+        print(json.dumps(snapshot_to_json(snapshot), ensure_ascii=False, indent=2))
+    elif args.status_line or args.tmux_line:
+        print(render_status_line(snapshot))
+    else:
+        print(render(snapshot, use_color))
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,3 +1,12 @@
 #!/usr/bin/env sh
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 "$SCRIPT_DIR/codex_hud.py" "$@"
+
+for arg in "$@"; do
+	case "$arg" in
+		--once|--json|--status-line|--tmux-line)
+			exec python3 "$SCRIPT_DIR/codex_hud.py" "$@"
+			;;
+	esac
+done
+
+exec node "$SCRIPT_DIR/ink_hud.mjs" "$@"
