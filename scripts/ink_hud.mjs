@@ -113,6 +113,52 @@ function remainingColor(remaining) {
 	return 'red';
 }
 
+function hasUsage(window) {
+	return window?.used_percent !== null && window?.used_percent !== undefined;
+}
+
+function reachedWindow(snapshot, windowName) {
+	const text = [snapshot?.limit_reached, snapshot?.limit_id]
+		.filter(value => typeof value === 'string')
+		.join(' ')
+		.toLowerCase();
+	if (!text) {
+		return false;
+	}
+	if (windowName === 'primary') {
+		return text.includes('primary') || text.includes('5h') || text.includes('5 hour') || text.includes('5-hour') || text.includes('window');
+	}
+	return text.includes('secondary') || text.includes('weekly') || text.includes('week') || text.includes('7d');
+}
+
+function exhaustedWindow(window) {
+	return {
+		...(window || {}),
+		used_percent: 100,
+		remaining_percent: 0
+	};
+}
+
+function mergeWindow(nextWindow, previousWindow, exhausted) {
+	const merged = hasUsage(nextWindow) ? nextWindow : {...(previousWindow || {}), ...(nextWindow || {})};
+	return exhausted ? exhaustedWindow(merged) : merged;
+}
+
+function mergeSnapshot(next, previous) {
+	if (!previous) {
+		return {
+			...next,
+			primary: reachedWindow(next, 'primary') ? exhaustedWindow(next.primary) : next.primary,
+			secondary: reachedWindow(next, 'secondary') ? exhaustedWindow(next.secondary) : next.secondary
+		};
+	}
+	return {
+		...next,
+		primary: mergeWindow(next.primary, previous.primary, reachedWindow(next, 'primary')),
+		secondary: mergeWindow(next.secondary, previous.secondary, reachedWindow(next, 'secondary'))
+	};
+}
+
 function freshness(snapshot) {
 	if (!snapshot?.source_updated_at) {
 		return 'waiting for Codex limit telemetry';
@@ -158,7 +204,7 @@ function Hud({args}) {
 	const refresh = useCallback(async () => {
 		try {
 			const next = await loadSnapshot(args.backendArgs);
-			setSnapshot(next);
+			setSnapshot(previous => mergeSnapshot(next, previous));
 			setError(null);
 			if (args.inkOnce) {
 				setTimeout(exit, 50);

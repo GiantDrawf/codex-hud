@@ -92,12 +92,22 @@ def newest_session_from_state(codex_home: Path) -> Path | None:
 
 def rate_window_from_dict(data: dict[str, Any] | None) -> RateWindow:
     data = data or {}
-    used = data.get("used_percent")
+    used = used_percent_from_dict(data)
     return RateWindow(
-        used_percent=float(used) if used is not None else None,
+        used_percent=used,
         window_minutes=int(data["window_minutes"]) if data.get("window_minutes") is not None else None,
         resets_at=int(data["resets_at"]) if data.get("resets_at") is not None else None,
     )
+
+
+def used_percent_from_dict(data: dict[str, Any]) -> float | None:
+    used = data.get("used_percent")
+    if used is not None:
+        return float(used)
+    remaining = data.get("remaining_percent")
+    if remaining is not None:
+        return 100.0 - float(remaining)
+    return None
 
 
 def read_latest_token_count(session_path: Path | None) -> dict[str, Any] | None:
@@ -123,6 +133,8 @@ def read_latest_token_count(session_path: Path | None) -> dict[str, Any] | None:
 
 
 def parse_latest_token_count_chunk(chunk: str, session_path: Path) -> dict[str, Any] | None:
+    latest_payload: dict[str, Any] | None = None
+    fallback_limits: dict[str, Any] | None = None
     for line in reversed(chunk.splitlines()):
         if '"type":"token_count"' not in line and '"type": "token_count"' not in line:
             continue
@@ -131,10 +143,49 @@ def parse_latest_token_count_chunk(chunk: str, session_path: Path) -> dict[str, 
         except json.JSONDecodeError:
             continue
         payload = event.get("payload") or {}
-        if payload.get("type") == "token_count":
-            payload["_codex_hud_source_updated_at"] = event_timestamp(event) or file_mtime(session_path)
-            return payload
-    return None
+        if payload.get("type") != "token_count":
+            continue
+        if latest_payload is None:
+            latest_payload = payload
+            latest_payload["_codex_hud_source_updated_at"] = event_timestamp(event) or file_mtime(session_path)
+            if rate_limits_have_windows(latest_payload.get("rate_limits") or {}):
+                return latest_payload
+            continue
+        limits = payload.get("rate_limits") or {}
+        if rate_limits_have_windows(limits):
+            fallback_limits = limits
+            break
+    if latest_payload is None:
+        return None
+    if fallback_limits:
+        latest_payload["rate_limits"] = merge_rate_limits(latest_payload.get("rate_limits") or {}, fallback_limits)
+    return latest_payload
+
+
+def rate_limits_have_windows(limits: dict[str, Any]) -> bool:
+    return window_has_usage(limits.get("primary")) and window_has_usage(limits.get("secondary"))
+
+
+def window_has_usage(window: dict[str, Any] | None) -> bool:
+    if not isinstance(window, dict):
+        return False
+    return window.get("used_percent") is not None or window.get("remaining_percent") is not None
+
+
+def merge_rate_limits(current: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(fallback)
+    merged.update({key: value for key, value in current.items() if value is not None})
+    for key in ("primary", "secondary"):
+        merged[key] = merge_window(current.get(key), fallback.get(key))
+    return merged
+
+
+def merge_window(current: dict[str, Any] | None, fallback: dict[str, Any] | None) -> dict[str, Any]:
+    current = current or {}
+    fallback = fallback or {}
+    merged = dict(fallback)
+    merged.update({key: value for key, value in current.items() if value is not None})
+    return merged
 
 
 def event_timestamp(event: dict[str, Any]) -> dt.datetime | None:
@@ -274,25 +325,44 @@ def extract_rate_limits_event(body: str) -> dict[str, Any] | None:
 
 def normalize_rate_limits_event(event: dict[str, Any]) -> dict[str, Any] | None:
     raw_limits = event.get("rate_limits") or {}
-    if not raw_limits:
+    limit_reached = event.get("limit_reached")
+    if not raw_limits and not limit_reached:
         return None
 
     def normalize_window(window: dict[str, Any] | None) -> dict[str, Any]:
         window = window or {}
+        used = used_percent_from_dict(window)
         return {
-            "used_percent": window.get("used_percent"),
+            "used_percent": used,
             "window_minutes": window.get("window_minutes"),
-            "resets_at": window.get("resets_at") or window.get("reset_at"),
+            "resets_at": window.get("resets_at") if window.get("resets_at") is not None else window.get("reset_at"),
         }
 
-    limit_reached = event.get("limit_reached")
+    reached_type = limit_reached_type(event)
     return {
         "primary": normalize_window(raw_limits.get("primary")),
         "secondary": normalize_window(raw_limits.get("secondary")),
         "plan_type": event.get("plan_type"),
         "limit_id": event.get("limit_id") or "codex",
-        "rate_limit_reached_type": "codex" if limit_reached else None,
+        "rate_limit_reached_type": reached_type,
     }
+
+
+def limit_reached_type(data: dict[str, Any]) -> str | None:
+    reached = data.get("rate_limit_reached_type") or data.get("limit_reached")
+    if not reached:
+        return None
+    if isinstance(reached, str):
+        return reached
+    if isinstance(reached, dict):
+        for key in ("type", "window", "limit_type", "rate_limit_type", "name", "id"):
+            value = reached.get(key)
+            if isinstance(value, str) and value:
+                return value
+    limit_id = data.get("limit_id")
+    if isinstance(limit_id, str) and limit_id:
+        return limit_id
+    return "codex"
 
 
 def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -> Snapshot:
@@ -311,16 +381,41 @@ def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -
             source_updated_at=previous.source_updated_at,
             available=False,
         )
+    primary = rate_window_from_dict(limits.get("primary"))
+    secondary = rate_window_from_dict(limits.get("secondary"))
+    limit_reached = limits.get("rate_limit_reached_type")
+    primary, secondary = apply_limit_reached(primary, secondary, limit_reached, limits.get("limit_id"))
     return Snapshot(
-        primary=rate_window_from_dict(limits.get("primary")),
-        secondary=rate_window_from_dict(limits.get("secondary")),
+        primary=primary,
+        secondary=secondary,
         plan_type=limits.get("plan_type"),
         limit_id=limits.get("limit_id"),
-        limit_reached=limits.get("rate_limit_reached_type"),
+        limit_reached=limit_reached,
         updated_at=dt.datetime.now(),
         source_updated_at=token_count.get("_codex_hud_source_updated_at") if limits else None,
         available=bool(limits),
     )
+
+
+def apply_limit_reached(
+    primary: RateWindow,
+    secondary: RateWindow,
+    limit_reached: str | None,
+    limit_id: str | None,
+) -> tuple[RateWindow, RateWindow]:
+    reached_text = " ".join(part.lower() for part in (limit_reached, limit_id) if isinstance(part, str))
+    if not reached_text:
+        return primary, secondary
+    if any(marker in reached_text for marker in ("primary", "5h", "5 hour", "5-hour", "window")):
+        primary.used_percent = 100.0
+    if any(marker in reached_text for marker in ("secondary", "weekly", "week", "7d")):
+        secondary.used_percent = 100.0
+    if primary.used_percent is None and secondary.used_percent is None:
+        if primary.resets_at and not secondary.resets_at:
+            primary.used_percent = 100.0
+        elif secondary.resets_at and not primary.resets_at:
+            secondary.used_percent = 100.0
+    return primary, secondary
 
 
 def bar(value: float | None, width: int = 18) -> str:

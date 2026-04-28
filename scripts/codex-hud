@@ -9,4 +9,8 @@ for arg in "$@"; do
 	esac
 done
 
+if [ -t 1 ]; then
+	printf '\033[2J\033[3J\033[H'
+fi
+
 exec node "$SCRIPT_DIR/ink_hud.mjs" "$@"
