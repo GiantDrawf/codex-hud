@@ -65,6 +65,8 @@ codex-hud --once --json
 codex-hud --status-line --once --no-clear
 ```
 
+当源 telemetry 超过 2 分钟没有更新时，单行状态栏会带上 `stale` 标记。
+
 ## 安装 alias
 
 推荐在 `~/.zshrc` 或 `~/.bashrc` 中添加：
@@ -105,6 +107,8 @@ Codex HUD 读取以下本地文件：
 - 如果你在网页版、其他设备或其他 Codex 会话中消耗额度，本地 HUD 通常要等当前 Codex CLI 下次收到 telemetry 后才会同步。
 - watch 模式会保留最后一次有效数据，避免临时读取失败时清空界面。
 - 如果最后一次源数据超过 2 分钟没有更新，标题区域会标记为 stale。
+
+`Updated` 是 HUD 本身渲染的时间，`Source` 是本地 Codex telemetry 快照的时间。如果本机没有运行 Codex CLI，`Updated` 会继续变化，但 `Source` 会停在最后一次本地 telemetry；此时百分比是历史本地快照，不是服务端实时余额。
 
 ## 安全性
 

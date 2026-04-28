@@ -170,7 +170,100 @@ def read_latest_token_count_anywhere(codex_home: Path, session_path: Path | None
         if token_count and token_count.get("rate_limits"):
             return token_count
     state_path = newest_session_from_state(codex_home)
-    return read_latest_token_count(state_path)
+    token_count = read_latest_token_count(state_path)
+    if token_count and token_count.get("rate_limits"):
+        return token_count
+    return read_latest_rate_limits_from_logs(codex_home)
+
+
+def read_latest_rate_limits_from_logs(codex_home: Path) -> dict[str, Any] | None:
+    db_path = codex_home / "logs_2.sqlite"
+    if not db_path.exists():
+        return None
+
+    query = """
+        SELECT ts, feedback_log_body
+        FROM logs
+        WHERE feedback_log_body LIKE '%"type":"codex.rate_limits"%'
+          AND target LIKE 'codex_api::%'
+        ORDER BY ts DESC, ts_nanos DESC, id DESC
+        LIMIT 100
+    """
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.2) as conn:
+            rows = conn.execute(query).fetchall()
+    except sqlite3.Error:
+        return None
+
+    for ts, body in rows:
+        event = extract_rate_limits_event(body or "")
+        if not event:
+            continue
+        rate_limits = normalize_rate_limits_event(event)
+        if not rate_limits:
+            continue
+        return {
+            "type": "token_count",
+            "rate_limits": rate_limits,
+            "_codex_hud_source_updated_at": dt.datetime.fromtimestamp(ts).astimezone(),
+        }
+    return None
+
+
+def extract_rate_limits_event(body: str) -> dict[str, Any] | None:
+    marker = '{"type":"codex.rate_limits"'
+    start = body.find(marker)
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(body[start:], start=start):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(body[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def normalize_rate_limits_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    raw_limits = event.get("rate_limits") or {}
+    if not raw_limits:
+        return None
+
+    def normalize_window(window: dict[str, Any] | None) -> dict[str, Any]:
+        window = window or {}
+        return {
+            "used_percent": window.get("used_percent"),
+            "window_minutes": window.get("window_minutes"),
+            "resets_at": window.get("resets_at") or window.get("reset_at"),
+        }
+
+    limit_reached = event.get("limit_reached")
+    return {
+        "primary": normalize_window(raw_limits.get("primary")),
+        "secondary": normalize_window(raw_limits.get("secondary")),
+        "plan_type": event.get("plan_type"),
+        "limit_id": event.get("limit_id") or "codex",
+        "rate_limit_reached_type": "codex" if limit_reached else None,
+    }
 
 
 def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -> Snapshot:
@@ -226,7 +319,7 @@ def render(snapshot: Snapshot, use_color: bool) -> str:
     lines.append(colorize(f"{title}  Usage Remaining", "bold", use_color))
     if snapshot.source_updated_at:
         source_text = snapshot.source_updated_at.strftime("%Y-%m-%d %H:%M:%S")
-        stale_seconds = max(0, int((snapshot.updated_at - snapshot.source_updated_at.replace(tzinfo=None)).total_seconds()))
+        stale_seconds = source_stale_seconds(snapshot)
         if stale_seconds > STALE_AFTER_SECONDS:
             stale_text = format_duration(stale_seconds)
             lines.append(colorize(f"Updated {updated}  |  Source {source_text}  |  stale for {stale_text}", "yellow", use_color))
@@ -257,8 +350,9 @@ def render_status_line(snapshot: Snapshot) -> str:
     secondary_remaining = remaining_text(snapshot.secondary)
     primary_reset = reset_datetime_text(snapshot.primary.resets_at, include_date=reset_is_not_today(snapshot.primary.resets_at))
     secondary_reset = reset_datetime_text(snapshot.secondary.resets_at, include_date=True)
+    freshness = status_freshness_text(snapshot)
     return (
-        f"HUD • 5h {primary_remaining} left reset {primary_reset} "
+        f"HUD{freshness} • 5h {primary_remaining} left reset {primary_reset} "
         f"• weekly {secondary_remaining} left reset {secondary_reset}"
     )
 
@@ -391,6 +485,26 @@ def format_duration(seconds: int) -> str:
     return f"{hours}h {rem_minutes}m"
 
 
+def source_stale_seconds(snapshot: Snapshot) -> int | None:
+    if not snapshot.source_updated_at:
+        return None
+    return max(0, int((snapshot.updated_at - snapshot.source_updated_at.replace(tzinfo=None)).total_seconds()))
+
+
+def is_stale(snapshot: Snapshot) -> bool:
+    stale_seconds = source_stale_seconds(snapshot)
+    return stale_seconds is None or stale_seconds > STALE_AFTER_SECONDS
+
+
+def status_freshness_text(snapshot: Snapshot) -> str:
+    stale_seconds = source_stale_seconds(snapshot)
+    if stale_seconds is None:
+        return " stale ?"
+    if stale_seconds <= STALE_AFTER_SECONDS:
+        return ""
+    return f" stale {format_duration(stale_seconds)}"
+
+
 def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
     return {
         "primary": {
@@ -409,6 +523,9 @@ def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
         "limit_id": snapshot.limit_id,
         "limit_reached": snapshot.limit_reached,
         "available": snapshot.available,
+        "is_stale": is_stale(snapshot),
+        "stale_after_seconds": STALE_AFTER_SECONDS,
+        "source_stale_seconds": source_stale_seconds(snapshot),
         "updated_at": snapshot.updated_at.isoformat(),
         "source_updated_at": snapshot.source_updated_at.isoformat() if snapshot.source_updated_at else None,
     }

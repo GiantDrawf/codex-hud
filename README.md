@@ -65,6 +65,8 @@ Print compact status-line output:
 codex-hud --status-line --once --no-clear
 ```
 
+When the source telemetry is older than 2 minutes, status-line output includes a `stale` marker.
+
 ## Install Alias
 
 Add this to `~/.zshrc` or `~/.bashrc`:
@@ -105,6 +107,8 @@ It shows the latest limit snapshot that Codex CLI wrote to local telemetry. As a
 - Usage from the web app, another device, or another Codex session may appear only after this Codex CLI receives new telemetry.
 - Watch mode keeps the last valid snapshot if a refresh temporarily cannot read telemetry.
 - If the last source snapshot is older than 2 minutes, the header marks it as stale.
+
+`Updated` is the time the HUD rendered. `Source` is the timestamp of the local Codex telemetry snapshot. If Codex CLI is not running locally, `Updated` can keep changing while `Source` stays fixed; in that case the percentages are historical local telemetry, not a live server-side balance.
 
 ## Safety
 
