@@ -3,12 +3,16 @@
 import React, {useCallback, useEffect, useState} from 'react';
 import {Box, Text, render, useApp, useInput, useStdin, useStdout} from 'ink';
 import {execFile} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import path from 'node:path';
 
 const h = React.createElement;
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const pythonBackend = path.join(scriptDir, 'codex_hud.py');
+const CARD_WIDTH = 38;
+const WIDE_COLUMNS = 82;
+const CARD_HORIZONTAL_CHROME = 6;
+const MIN_BAR_WIDTH = 10;
 
 function parseArgs(argv) {
 	const args = {
@@ -113,6 +117,19 @@ function remainingColor(remaining) {
 	return 'red';
 }
 
+export function cardLayoutForColumns(columns = 80) {
+	const safeColumns = Math.max(1, columns || 80);
+	const wide = safeColumns >= WIDE_COLUMNS;
+	return {
+		wide,
+		cardWidth: wide ? CARD_WIDTH : safeColumns
+	};
+}
+
+export function progressBarWidthForCard(cardWidth) {
+	return Math.max(MIN_BAR_WIDTH, cardWidth - CARD_HORIZONTAL_CHROME);
+}
+
 function hasUsage(window) {
 	return window?.used_percent !== null && window?.used_percent !== undefined;
 }
@@ -169,21 +186,22 @@ function freshness(snapshot) {
 	return `source ${new Date(snapshot.source_updated_at).toLocaleString()}`;
 }
 
-function LimitCard({title, subtitle, window, weekly}) {
+function LimitCard({title, subtitle, window, weekly, width}) {
 	const used = window?.used_percent;
 	const remaining = window?.remaining_percent;
 	const color = remainingColor(remaining);
 	const reset = resetText(window?.resets_at, weekly || isNotToday(window?.resets_at));
+	const barWidth = progressBarWidthForCard(width);
 
 	return h(
 		Box,
-		{borderStyle: 'round', borderColor: color, paddingX: 1, width: 38, flexDirection: 'column'},
+		{borderStyle: 'round', borderColor: color, paddingX: 1, width, flexDirection: 'column'},
 		h(Text, {bold: true}, title),
 		h(Text, {dimColor: true}, subtitle),
 		h(Box, {height: 1}),
 		h(Text, {color}, `已用：${percent(used)}`),
 		h(Text, {color}, `剩余：${percent(remaining)}`),
-		h(Text, {color}, bar(remaining)),
+		h(Text, {color}, bar(remaining, barWidth)),
 		h(Text, null, `重置时间：${reset}`)
 	);
 }
@@ -236,7 +254,7 @@ function Hud({args}) {
 		};
 	}, [args.interval, refresh]);
 
-	const wide = (stdout?.columns || 80) >= 82;
+	const layout = cardLayoutForColumns(stdout?.columns || 80);
 	const updated = snapshot ? new Date(snapshot.updated_at).toLocaleString() : '-';
 	return h(
 		Box,
@@ -247,9 +265,9 @@ function Hud({args}) {
 		snapshot
 			? h(
 				Box,
-				{flexDirection: wide ? 'row' : 'column', gap: 2},
-				h(LimitCard, {title: '5 小时使用限额', subtitle: '滚动窗口', window: snapshot.primary, weekly: false}),
-				h(LimitCard, {title: '每周使用限额', subtitle: '订阅周期', window: snapshot.secondary, weekly: true})
+				{flexDirection: layout.wide ? 'row' : 'column', gap: 2},
+				h(LimitCard, {title: '5 小时使用限额', subtitle: '滚动窗口', window: snapshot.primary, weekly: false, width: layout.cardWidth}),
+				h(LimitCard, {title: '每周使用限额', subtitle: '订阅周期', window: snapshot.secondary, weekly: true, width: layout.cardWidth})
 			)
 			: h(Text, {color: 'yellow'}, 'loading usage snapshot...'),
 		snapshot && h(Box, {height: 1}),
@@ -258,4 +276,6 @@ function Hud({args}) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-render(h(Hud, {args}), {exitOnCtrlC: true});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+	render(h(Hud, {args}), {exitOnCtrlC: true});
+}
