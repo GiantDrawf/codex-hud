@@ -325,8 +325,9 @@ def extract_rate_limits_event(body: str) -> dict[str, Any] | None:
 
 def normalize_rate_limits_event(event: dict[str, Any]) -> dict[str, Any] | None:
     raw_limits = event.get("rate_limits") or {}
-    limit_reached = event.get("limit_reached")
-    if not raw_limits and not limit_reached:
+    limit_reached = event.get("limit_reached") or raw_limits.get("limit_reached")
+    allowed = raw_limits.get("allowed")
+    if not raw_limits and not limit_reached and allowed is not False:
         return None
 
     def normalize_window(window: dict[str, Any] | None) -> dict[str, Any]:
@@ -338,7 +339,7 @@ def normalize_rate_limits_event(event: dict[str, Any]) -> dict[str, Any] | None:
             "resets_at": window.get("resets_at") if window.get("resets_at") is not None else window.get("reset_at"),
         }
 
-    reached_type = limit_reached_type(event)
+    reached_type = limit_reached_type(event, raw_limits)
     return {
         "primary": normalize_window(raw_limits.get("primary")),
         "secondary": normalize_window(raw_limits.get("secondary")),
@@ -348,10 +349,16 @@ def normalize_rate_limits_event(event: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def limit_reached_type(data: dict[str, Any]) -> str | None:
-    reached = data.get("rate_limit_reached_type") or data.get("limit_reached")
+def limit_reached_type(data: dict[str, Any], raw_limits: dict[str, Any] | None = None) -> str | None:
+    raw_limits = raw_limits or data.get("rate_limits") or {}
+    reached = (
+        data.get("rate_limit_reached_type")
+        or data.get("limit_reached")
+        or raw_limits.get("rate_limit_reached_type")
+        or raw_limits.get("limit_reached")
+    )
     if not reached:
-        return None
+        return infer_reached_window(raw_limits) if raw_limits.get("allowed") is False else None
     if isinstance(reached, str):
         return reached
     if isinstance(reached, dict):
@@ -359,10 +366,26 @@ def limit_reached_type(data: dict[str, Any]) -> str | None:
             value = reached.get(key)
             if isinstance(value, str) and value:
                 return value
+    if reached is True:
+        return infer_reached_window(raw_limits) or "primary"
     limit_id = data.get("limit_id")
     if isinstance(limit_id, str) and limit_id:
         return limit_id
     return "codex"
+
+
+def infer_reached_window(raw_limits: dict[str, Any]) -> str | None:
+    windows = []
+    for name in ("primary", "secondary"):
+        window = raw_limits.get(name)
+        if not isinstance(window, dict):
+            continue
+        used = used_percent_from_dict(window)
+        if used is not None:
+            windows.append((name, used))
+    if not windows:
+        return None
+    return max(windows, key=lambda item: item[1])[0]
 
 
 def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -> Snapshot:
