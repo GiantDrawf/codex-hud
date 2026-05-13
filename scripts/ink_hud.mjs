@@ -117,6 +117,10 @@ function remainingColor(remaining) {
 	return 'red';
 }
 
+export function displayColorForMode(remaining, bossMode) {
+	return bossMode ? undefined : remainingColor(remaining);
+}
+
 export function cardLayoutForColumns(columns = 80) {
 	const safeColumns = Math.max(1, columns || 80);
 	const wide = safeColumns >= WIDE_COLUMNS;
@@ -186,10 +190,10 @@ function freshness(snapshot) {
 	return `source ${new Date(snapshot.source_updated_at).toLocaleString()}`;
 }
 
-function LimitCard({title, subtitle, window, weekly, width}) {
+function LimitCard({title, subtitle, window, weekly, width, bossMode}) {
 	const used = window?.used_percent;
 	const remaining = window?.remaining_percent;
-	const color = remainingColor(remaining);
+	const color = displayColorForMode(remaining, bossMode);
 	const reset = resetText(window?.resets_at, weekly || isNotToday(window?.resets_at));
 	const barWidth = progressBarWidthForCard(width);
 
@@ -212,10 +216,15 @@ function Hud({args}) {
 	const {stdout} = useStdout();
 	const [snapshot, setSnapshot] = useState(null);
 	const [error, setError] = useState(null);
+	const [bossMode, setBossMode] = useState(false);
 
 	useInput((input, key) => {
 		if (input === 'q' || key.escape) {
 			exit();
+			return;
+		}
+		if (input === 'b' || input === 'B') {
+			setBossMode(value => !value);
 		}
 	}, {isActive: Boolean(isRawModeSupported)});
 
@@ -260,16 +269,16 @@ function Hud({args}) {
 		Box,
 		{flexDirection: 'column'},
 		h(Text, {bold: true}, 'Codex HUD  Usage Remaining'),
-		h(Text, {dimColor: !snapshot, color: error ? 'yellow' : undefined}, error || `updated ${updated} | ${freshness(snapshot)}`),
+		h(Text, {dimColor: !snapshot, color: error && !bossMode ? 'yellow' : undefined}, error || `updated ${updated} | ${freshness(snapshot)}`),
 		h(Box, {height: 1}),
 		snapshot
 			? h(
 				Box,
 				{flexDirection: layout.wide ? 'row' : 'column', gap: 2},
-				h(LimitCard, {title: '5 小时使用限额', subtitle: '滚动窗口', window: snapshot.primary, weekly: false, width: layout.cardWidth}),
-				h(LimitCard, {title: '每周使用限额', subtitle: '订阅周期', window: snapshot.secondary, weekly: true, width: layout.cardWidth})
+				h(LimitCard, {title: '5 小时使用限额', subtitle: '滚动窗口', window: snapshot.primary, weekly: false, width: layout.cardWidth, bossMode}),
+				h(LimitCard, {title: '每周使用限额', subtitle: '订阅周期', window: snapshot.secondary, weekly: true, width: layout.cardWidth, bossMode})
 			)
-			: h(Text, {color: 'yellow'}, 'loading usage snapshot...'),
+			: h(Text, {color: bossMode ? undefined : 'yellow'}, 'loading usage snapshot...'),
 		snapshot && h(Box, {height: 1}),
 		snapshot && h(Text, {dimColor: true}, `Plan: ${snapshot.plan_type || '-'} | limit: ${snapshot.limit_id || '-'} | reached: ${snapshot.limit_reached || 'no'} | q to quit`)
 	);

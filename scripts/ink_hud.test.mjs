@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {cardLayoutForColumns, progressBarWidthForCard} from './ink_hud.mjs';
+import {cardLayoutForColumns, displayColorForMode, progressBarWidthForCard} from './ink_hud.mjs';
 
 test('uses full available width for limit cards when stacked', () => {
 	const layout = cardLayoutForColumns(60);
@@ -19,4 +19,9 @@ test('keeps fixed card width when cards fit side by side', () => {
 
 test('expands progress bars to match wider stacked cards', () => {
 	assert.equal(progressBarWidthForCard(60), 54);
+});
+
+test('drops accent colors in boss mode', () => {
+	assert.equal(displayColorForMode(4, false), 'red');
+	assert.equal(displayColorForMode(4, true), undefined);
 });
