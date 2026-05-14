@@ -16,28 +16,38 @@ Codex HUD focuses on two subscription limits:
 - `每周使用限额`: Codex telemetry's secondary rolling limit window.
 
 It shows both used and remaining percentages. Live mode also summarizes local
-token usage for today, current weekly limit window, the past 7 days, and the
-past 30 days, based on `token_count` events in local rollout files. Status-line
-mode keeps the compact remaining-only format.
+token usage for today, yesterday, the current weekly limit window, the past 7
+days, and the past 30 days, based on `token_count` events in local rollout
+files. Status-line mode keeps the compact remaining-only format.
 
 Example:
 
 ```text
-Codex HUD  Usage Remaining
-Updated 2026-04-24 15:08:31  |  Source 2026-04-24 15:08:31
+Codex HUD | updated 13:12:35 | source 13:12:28
 
-┌────────────────────────────────────┐  ┌────────────────────────────────────┐
-│ 5 小时使用限额                     │  │ 每周使用限额                       │
-│ 滚动窗口                           │  │ 订阅周期                           │
-│                                    │  │                                    │
-│ 已用：22%                          │  │ 已用：17%                          │
-│ 剩余：78%                          │  │ 剩余：83%                          │
-│ [■■■■■■■■■■■■■■■■■·····]           │  │ [■■■■■■■■■■■■■■■■■■····]           │
-│ 重置时间：19:34                    │  │ 重置时间：2026年4月29日 23:53      │
-└────────────────────────────────────┘  └────────────────────────────────────┘
+┌────────────────────────────────────┐ ┌────────────────────────────────────┐
+│ 5 小时使用限额                     │ │ 每周使用限额                       │
+│ 滚动窗口                           │ │ 订阅周期                           │
+│                                    │ │                                    │
+│ 已用：49%                          │ │ 已用：13%                          │
+│ 剩余：51%                          │ │ 剩余：87%                          │
+│ [■■■■■■■■■■■■■■■■················] │ │ [■■■■■■■■■■■■■■■■■■■■■■■■■■■■····] │
+│ 重置时间：14:29                    │ │ 重置时间：2026年5月20日 10:22      │
+└────────────────────────────────────┘ └────────────────────────────────────┘
+
+Token 汇总
+                                   input              output               total                cost
+今日                          14,806,394              48,232          14,854,626              $11.52
+昨日                           8,692,362              35,687           8,728,049               $8.06
+本周限额                      23,434,729              83,693          23,518,422              $19.41
+近 7 天                       72,304,663             225,938          72,530,601              $56.78
+近 30 天                     296,161,983             782,514         296,944,497             $215.95
 ```
 
 The two limit cards render side by side and shrink to fit narrower terminals.
+
+The cost column is an estimate in USD. It uses known OpenAI API token prices for
+supported models and separates cached input from regular input.
 
 ## Usage
 
