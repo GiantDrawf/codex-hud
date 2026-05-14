@@ -15,7 +15,10 @@ Codex HUD focuses on two subscription limits:
 - `5 小时使用限额`: Codex telemetry's primary rate-limit window.
 - `每周使用限额`: Codex telemetry's secondary rolling limit window.
 
-It shows both used and remaining percentages. Status-line mode keeps the compact remaining-only format.
+It shows both used and remaining percentages. Live mode also summarizes local
+token usage for today, current weekly limit window, the past 7 days, and the
+past 30 days, based on `token_count` events in local rollout files. Status-line
+mode keeps the compact remaining-only format.
 
 Example:
 
@@ -34,7 +37,7 @@ Updated 2026-04-24 15:08:31  |  Source 2026-04-24 15:08:31
 └────────────────────────────────────┘  └────────────────────────────────────┘
 ```
 
-Cards render side by side when the terminal is wide enough, and fall back to stacked layout on narrow terminals.
+The two limit cards render side by side and shrink to fit narrower terminals.
 
 ## Usage
 
@@ -44,7 +47,15 @@ Watch live:
 codex-hud
 ```
 
-Live mode opens the Ink TUI. Press `q`, `Esc`, or `Ctrl-C` to exit.
+Live mode opens the Ink TUI. It watches `scripts/ink_hud.mjs` and
+`scripts/codex_hud.py`, then restarts the UI automatically when either file
+changes. Press `q`, `Esc`, or `Ctrl-C` to exit.
+
+Disable source watching when needed:
+
+```bash
+codex-hud --no-watch
+```
 
 If the alias is not installed, run the wrapper directly:
 
@@ -101,6 +112,12 @@ Codex HUD reads:
 - `~/.codex/state_5.sqlite`
 
 The primary data comes from local `codex.rate_limits` and `token_count.rate_limits` telemetry events. `state_5.sqlite` is used only as a fallback to locate the latest rollout file.
+
+Token summaries are computed from per-session `total_token_usage` deltas, so
+duplicate telemetry events are not counted twice. Cost estimates use the
+published OpenAI API per-token prices for known models and account for cached
+input separately. Tokens from models without a known price are included in token
+totals but excluded from the cost column.
 
 ## Freshness
 

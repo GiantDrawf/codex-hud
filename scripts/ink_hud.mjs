@@ -10,7 +10,8 @@ const h = React.createElement;
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const pythonBackend = path.join(scriptDir, 'codex_hud.py');
 const CARD_WIDTH = 38;
-const WIDE_COLUMNS = 82;
+const CARD_GAP = 1;
+const MIN_CARD_WIDTH = 24;
 const CARD_HORIZONTAL_CHROME = 6;
 const MIN_BAR_WIDTH = 10;
 
@@ -74,7 +75,96 @@ function percent(value, digits = 0) {
 	return `${Number(value).toFixed(digits)}%`;
 }
 
-function resetText(timestamp, includeDate) {
+function tokenNumber(value) {
+	if (value === null || value === undefined) {
+		return '-';
+	}
+	return Number(value).toLocaleString();
+}
+
+function usd(value) {
+	if (value === null || value === undefined) {
+		return '-';
+	}
+	return `$${(Number(value || 0) / 1_000_000).toFixed(2)}`;
+}
+
+function displayWidth(value) {
+	return Array.from(String(value)).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+}
+
+function padDisplay(value, width) {
+	const text = String(value);
+	const padding = Math.max(0, width - displayWidth(text));
+	return `${text}${' '.repeat(padding)}`;
+}
+
+function leftPad(value, width) {
+	const text = String(value);
+	const padding = Math.max(0, width - displayWidth(text));
+	return `${' '.repeat(padding)}${text}`;
+}
+
+function fitDisplay(value, width, align = 'left') {
+	const text = String(value);
+	if (displayWidth(text) > width) {
+		return truncateDisplay(text, width);
+	}
+	return align === 'right' ? leftPad(text, width) : padDisplay(text, width);
+}
+
+function truncateDisplay(value, width) {
+	let used = 0;
+	let result = '';
+	for (const char of String(value)) {
+		const charWidth = displayWidth(char);
+		if (used + charWidth > width) {
+			break;
+		}
+		result += char;
+		used += charWidth;
+	}
+	return `${result}${' '.repeat(Math.max(0, width - used))}`;
+}
+
+function tokenSummaryRows(summary) {
+	return [
+		['今日', summary.today || {}],
+		['昨日', summary.yesterday || {}],
+		['本周限额', summary.current_weekly_limit || {}],
+		['近 7 天', summary.last_7_days || {}],
+		['近 30 天', summary.last_30_days || {}]
+	];
+}
+
+function evenColumnWidths(totalWidth, count, gap) {
+	const usableWidth = Math.max(count, totalWidth - gap * (count - 1));
+	const base = Math.floor(usableWidth / count);
+	const remainder = usableWidth % count;
+	return Array.from({length: count}, (_, index) => base + (index < remainder ? 1 : 0));
+}
+
+function tokenSummaryHeader(widths) {
+	return [
+		fitDisplay('', widths[0]),
+		fitDisplay('input', widths[1], 'right'),
+		fitDisplay('output', widths[2], 'right'),
+		fitDisplay('total', widths[3], 'right'),
+		fitDisplay('cost', widths[4], 'right')
+	].join('  ');
+}
+
+function tokenSummaryLine(label, usage, widths) {
+	return [
+		fitDisplay(label, widths[0]),
+		fitDisplay(tokenNumber(usage.input_tokens), widths[1], 'right'),
+		fitDisplay(tokenNumber(usage.output_tokens), widths[2], 'right'),
+		fitDisplay(tokenNumber(usage.total_tokens), widths[3], 'right'),
+		fitDisplay(usd(usage.estimated_cost_usd_micros), widths[4], 'right')
+	].join('  ');
+}
+
+function resetText(timestamp, includeDate, compact = false) {
 	if (!timestamp) {
 		return '-';
 	}
@@ -83,6 +173,9 @@ function resetText(timestamp, includeDate) {
 	const minute = String(value.getMinutes()).padStart(2, '0');
 	if (!includeDate) {
 		return `${hour}:${minute}`;
+	}
+	if (compact) {
+		return `${value.getMonth() + 1}/${value.getDate()} ${hour}:${minute}`;
 	}
 	return `${value.getFullYear()}年${value.getMonth() + 1}月${value.getDate()}日 ${hour}:${minute}`;
 }
@@ -123,10 +216,10 @@ export function displayColorForMode(remaining, bossMode) {
 
 export function cardLayoutForColumns(columns = 80) {
 	const safeColumns = Math.max(1, columns || 80);
-	const wide = safeColumns >= WIDE_COLUMNS;
+	const availableCardWidth = Math.floor((safeColumns - CARD_GAP) / 2);
 	return {
-		wide,
-		cardWidth: wide ? CARD_WIDTH : safeColumns
+		cardWidth: Math.max(MIN_CARD_WIDTH, Math.min(CARD_WIDTH, availableCardWidth)),
+		gap: CARD_GAP
 	};
 }
 
@@ -187,14 +280,23 @@ function freshness(snapshot) {
 	if (snapshot.is_stale) {
 		return `source stale ${snapshot.source_stale_seconds ?? '?'}s`;
 	}
-	return `source ${new Date(snapshot.source_updated_at).toLocaleString()}`;
+	return `source ${shortTime(snapshot.source_updated_at)}`;
+}
+
+function shortTime(value) {
+	return new Date(value).toLocaleTimeString();
+}
+
+function titleLine(snapshot, updated, error) {
+	const status = error || `updated ${updated} | ${freshness(snapshot)}`;
+	return `Codex HUD | ${status}`;
 }
 
 function LimitCard({title, subtitle, window, weekly, width, bossMode}) {
 	const used = window?.used_percent;
 	const remaining = window?.remaining_percent;
 	const color = displayColorForMode(remaining, bossMode);
-	const reset = resetText(window?.resets_at, weekly || isNotToday(window?.resets_at));
+	const reset = resetText(window?.resets_at, weekly || isNotToday(window?.resets_at), width < 34);
 	const barWidth = progressBarWidthForCard(width);
 
 	return h(
@@ -207,6 +309,21 @@ function LimitCard({title, subtitle, window, weekly, width, bossMode}) {
 		h(Text, {color}, `剩余：${percent(remaining)}`),
 		h(Text, {color}, bar(remaining, barWidth)),
 		h(Text, null, `重置时间：${reset}`)
+	);
+}
+
+function TokenSummary({summary, width}) {
+	if (!summary) {
+		return null;
+	}
+	const rows = tokenSummaryRows(summary);
+	const widths = evenColumnWidths(Math.max(50, width || 80), 5, 2);
+	return h(
+		Box,
+		{flexDirection: 'column'},
+		h(Text, {bold: true}, 'Token 汇总'),
+		h(Text, {dimColor: true}, tokenSummaryHeader(widths)),
+		...rows.map(([label, usage]) => h(Text, {key: label}, tokenSummaryLine(label, usage, widths)))
 	);
 }
 
@@ -264,21 +381,22 @@ function Hud({args}) {
 	}, [args.interval, refresh]);
 
 	const layout = cardLayoutForColumns(stdout?.columns || 80);
-	const updated = snapshot ? new Date(snapshot.updated_at).toLocaleString() : '-';
+	const updated = snapshot ? shortTime(snapshot.updated_at) : '-';
 	return h(
 		Box,
 		{flexDirection: 'column'},
-		h(Text, {bold: true}, 'Codex HUD  Usage Remaining'),
-		h(Text, {dimColor: !snapshot, color: error && !bossMode ? 'yellow' : undefined}, error || `updated ${updated} | ${freshness(snapshot)}`),
+		h(Text, {bold: true, color: error && !bossMode ? 'yellow' : undefined}, titleLine(snapshot, updated, error)),
 		h(Box, {height: 1}),
 		snapshot
 			? h(
 				Box,
-				{flexDirection: layout.wide ? 'row' : 'column', gap: 2},
+				{flexDirection: 'row', gap: layout.gap},
 				h(LimitCard, {title: '5 小时使用限额', subtitle: '滚动窗口', window: snapshot.primary, weekly: false, width: layout.cardWidth, bossMode}),
 				h(LimitCard, {title: '每周使用限额', subtitle: '订阅周期', window: snapshot.secondary, weekly: true, width: layout.cardWidth, bossMode})
 			)
 			: h(Text, {color: bossMode ? undefined : 'yellow'}, 'loading usage snapshot...'),
+		snapshot?.token_summary && h(Box, {height: 1}),
+		snapshot?.token_summary && h(TokenSummary, {summary: snapshot.token_summary, width: stdout?.columns || 80}),
 		snapshot && h(Box, {height: 1}),
 		snapshot && h(Text, {dimColor: true}, `Plan: ${snapshot.plan_type || '-'} | limit: ${snapshot.limit_id || '-'} | reached: ${snapshot.limit_reached || 'no'} | q to quit`)
 	);

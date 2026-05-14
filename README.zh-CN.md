@@ -15,7 +15,9 @@ HUD 只展示两类订阅限额：
 - `5 小时使用限额`：Codex telemetry 中的 primary rate-limit window。
 - `每周使用限额`：Codex telemetry 中的 secondary rate-limit window。
 
-实时面板同时显示“已用百分比”和“剩余百分比”；单行状态栏保持只显示剩余量的紧凑格式。
+实时面板同时显示“已用百分比”和“剩余百分比”，并基于本地 rollout 文件中的
+`token_count` 事件汇总今日、当前每周限额窗口、近 7 天和近 30 天 token 用量；
+单行状态栏保持只显示剩余量的紧凑格式。
 
 示例：
 
@@ -34,7 +36,7 @@ Updated 2026-04-24 15:08:31  |  Source 2026-04-24 15:08:31
 └────────────────────────────────────┘  └────────────────────────────────────┘
 ```
 
-终端宽度足够时，两张卡片会并排展示；宽度不足时会自动降级为上下两行。
+两张限额卡片会并排展示，并在窄终端下自动压缩宽度。
 
 ## 使用方式
 
@@ -44,7 +46,15 @@ Updated 2026-04-24 15:08:31  |  Source 2026-04-24 15:08:31
 codex-hud
 ```
 
-实时模式会启动 Ink TUI。按 `q`、`Esc` 或 `Ctrl-C` 退出。
+实时模式会启动 Ink TUI，并监听 `scripts/ink_hud.mjs` 和
+`scripts/codex_hud.py`。这两个文件变化时，HUD 会自动重启界面。按 `q`、`Esc`
+或 `Ctrl-C` 退出。
+
+需要关闭源码监听时：
+
+```bash
+codex-hud --no-watch
+```
 
 如果没有配置 alias，也可以直接运行：
 
@@ -101,6 +111,11 @@ Codex HUD 读取以下本地文件：
 - `~/.codex/state_5.sqlite`
 
 主要数据来自本地 `codex.rate_limits` 和 `token_count.rate_limits` telemetry 事件。`state_5.sqlite` 只用于在必要时定位最新的 rollout 文件。
+
+Token 汇总通过每个会话内 `total_token_usage` 的增量计算，因此重复上报的
+telemetry 事件不会重复计数。费用估算使用 OpenAI API 已公布的模型 token
+价格，并单独计算 cached input。没有已知价格的模型会计入 token 总量，但不会计入
+cost 列。
 
 ## 实时性说明
 

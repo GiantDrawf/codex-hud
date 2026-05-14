@@ -1,16 +1,47 @@
 #!/usr/bin/env sh
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+WATCH=1
 
 for arg in "$@"; do
 	case "$arg" in
 		--once|--json|--status-line|--tmux-line)
 			exec python3 "$SCRIPT_DIR/codex_hud.py" "$@"
 			;;
+		--ink-once)
+			WATCH=0
+			;;
+		--no-watch)
+			WATCH=0
+			;;
 	esac
 done
 
+FILTERED_ARGS=
+for arg in "$@"; do
+	case "$arg" in
+		--no-watch)
+			;;
+		*)
+			FILTERED_ARGS="${FILTERED_ARGS}${FILTERED_ARGS:+
+}$arg"
+			;;
+	esac
+done
+set --
+if [ -n "$FILTERED_ARGS" ]; then
+	while IFS= read -r arg; do
+		set -- "$@" "$arg"
+	done <<EOF
+$FILTERED_ARGS
+EOF
+fi
+
 if [ -t 1 ]; then
 	printf '\033[2J\033[3J\033[H'
+fi
+
+if [ "$WATCH" = 1 ]; then
+	exec node "$SCRIPT_DIR/watch_hud.mjs" "$@"
 fi
 
 exec node "$SCRIPT_DIR/ink_hud.mjs" "$@"

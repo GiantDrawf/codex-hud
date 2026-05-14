@@ -23,6 +23,15 @@ DEFAULT_CODEX_HOME = Path.home() / ".codex"
 READ_CHUNK_BYTES = 2_000_000
 MAX_TOKEN_COUNT_SCAN_BYTES = 20_000_000
 STALE_AFTER_SECONDS = 120
+CARD_WIDTH = 38
+CARD_GAP = 1
+MIN_CARD_WIDTH = 24
+TOKEN_SUMMARY_DAYS = 30
+TOKEN_PRICE_USD_PER_1M = {
+    "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
+    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+}
 
 
 @dataclass
@@ -36,6 +45,8 @@ class RateWindow:
 class Snapshot:
     primary: RateWindow
     secondary: RateWindow
+    info: dict[str, Any] | None
+    token_summary: dict[str, Any] | None
     plan_type: str | None
     limit_id: str | None
     limit_reached: str | None
@@ -243,6 +254,210 @@ def token_count_source_ts(token_count: dict[str, Any]) -> float:
     return 0.0
 
 
+def build_token_summary(
+    codex_home: Path,
+    latest_info: dict[str, Any] | None,
+    weekly_window: RateWindow,
+) -> dict[str, Any] | None:
+    today = dt.datetime.now().astimezone().date()
+    yesterday = today - dt.timedelta(days=1)
+    start_date = today - dt.timedelta(days=TOKEN_SUMMARY_DAYS - 1)
+    weekly_period = period_from_window(weekly_window)
+    if weekly_period and weekly_period[0].date() < start_date:
+        start_date = weekly_period[0].date()
+    totals = {
+        "today": empty_token_usage(),
+        "yesterday": empty_token_usage(),
+        "current_weekly_limit": empty_token_usage(),
+        "last_7_days": empty_token_usage(),
+        "last_30_days": empty_token_usage(),
+    }
+    scanned_files = 0
+    event_count = 0
+
+    pattern = str(codex_home / "sessions" / "**" / "rollout-*.jsonl")
+    paths = [Path(path) for path in glob.glob(pattern, recursive=True)]
+    for path in sorted(paths):
+        try:
+            if dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone().date() < start_date:
+                continue
+        except OSError:
+            continue
+        scanned_files += 1
+        event_count += add_session_token_usage(path, start_date, today, yesterday, weekly_period, totals)
+
+    context_window = None
+    if latest_info:
+        context_window = latest_info.get("model_context_window")
+    if not event_count and context_window is None:
+        return None
+    return {
+        "today": totals["today"],
+        "yesterday": totals["yesterday"],
+        "current_weekly_limit": totals["current_weekly_limit"],
+        "last_7_days": totals["last_7_days"],
+        "last_30_days": totals["last_30_days"],
+        "current_weekly_limit_period": period_to_json(weekly_period),
+        "plus_subscription_period": None,
+        "context_window": context_window,
+        "days": TOKEN_SUMMARY_DAYS,
+        "scanned_files": scanned_files,
+        "event_count": event_count,
+    }
+
+
+def empty_token_usage() -> dict[str, int]:
+    return {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd_micros": 0,
+        "unpriced_tokens": 0,
+    }
+
+
+def add_session_token_usage(
+    path: Path,
+    start_date: dt.date,
+    today: dt.date,
+    yesterday: dt.date,
+    weekly_period: tuple[dt.datetime, dt.datetime] | None,
+    totals: dict[str, dict[str, int]],
+) -> int:
+    previous: dict[str, int] | None = None
+    current_model: str | None = None
+    event_count = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                current_model = model_from_line(line) or current_model
+                if '"type":"token_count"' not in line and '"type": "token_count"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = event.get("payload") or {}
+                if payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info") or {}
+                usage = normalize_token_usage(info.get("total_token_usage"))
+                if not usage:
+                    continue
+                timestamp = event_timestamp(event) or file_mtime(path)
+                if not timestamp:
+                    continue
+                event_date = timestamp.date()
+                delta = token_usage_delta(previous, usage)
+                previous = usage
+                if not delta or event_date < start_date or event_date > today:
+                    continue
+                add_cost_estimate(delta, current_model)
+                add_token_usage(totals["last_30_days"], delta)
+                if event_date >= today - dt.timedelta(days=6):
+                    add_token_usage(totals["last_7_days"], delta)
+                if timestamp_in_period(timestamp, weekly_period):
+                    add_token_usage(totals["current_weekly_limit"], delta)
+                if event_date == today:
+                    add_token_usage(totals["today"], delta)
+                elif event_date == yesterday:
+                    add_token_usage(totals["yesterday"], delta)
+                event_count += 1
+    except OSError:
+        return event_count
+    return event_count
+
+
+def period_from_window(window: RateWindow) -> tuple[dt.datetime, dt.datetime] | None:
+    if not window.resets_at or not window.window_minutes:
+        return None
+    end = dt.datetime.fromtimestamp(window.resets_at, tz=dt.timezone.utc).astimezone()
+    start = end - dt.timedelta(minutes=window.window_minutes)
+    return start, end
+
+
+def period_to_json(period: tuple[dt.datetime, dt.datetime] | None) -> dict[str, Any] | None:
+    if not period:
+        return None
+    start, end = period
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
+
+
+def timestamp_in_period(timestamp: dt.datetime, period: tuple[dt.datetime, dt.datetime] | None) -> bool:
+    if not period:
+        return False
+    start, end = period
+    return start <= timestamp < end
+
+
+def model_from_line(line: str) -> str | None:
+    if '"model"' not in line:
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    payload = event.get("payload") or {}
+    model = payload.get("model")
+    return model if isinstance(model, str) else None
+
+
+def normalize_token_usage(data: Any) -> dict[str, int] | None:
+    if not isinstance(data, dict):
+        return None
+    usage = {}
+    for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"):
+        value = data.get(key)
+        try:
+            usage[key] = int(value or 0)
+        except (TypeError, ValueError):
+            usage[key] = 0
+    if usage["total_tokens"] <= 0 and usage["input_tokens"] <= 0 and usage["output_tokens"] <= 0:
+        return None
+    return usage
+
+
+def token_usage_delta(previous: dict[str, int] | None, current: dict[str, int]) -> dict[str, int]:
+    if previous is None:
+        return dict(current)
+    delta = {}
+    for key, value in current.items():
+        previous_value = previous.get(key, 0)
+        delta[key] = value - previous_value if value >= previous_value else value
+    if all(value == 0 for value in delta.values()):
+        return {}
+    return delta
+
+
+def add_token_usage(total: dict[str, int], delta: dict[str, int]) -> None:
+    for key, value in delta.items():
+        total[key] = total.get(key, 0) + max(0, int(value))
+
+
+def add_cost_estimate(delta: dict[str, int], model: str | None) -> None:
+    price = TOKEN_PRICE_USD_PER_1M.get(model or "")
+    if not price:
+        delta["estimated_cost_usd_micros"] = 0
+        delta["unpriced_tokens"] = delta.get("total_tokens", 0)
+        return
+    cached_input = max(0, delta.get("cached_input_tokens", 0))
+    input_tokens = max(0, delta.get("input_tokens", 0))
+    uncached_input = max(0, input_tokens - cached_input)
+    output_tokens = max(0, delta.get("output_tokens", 0))
+    cost = (
+        uncached_input * price["input"]
+        + cached_input * price["cached_input"]
+        + output_tokens * price["output"]
+    ) / 1_000_000
+    delta["estimated_cost_usd_micros"] = round(cost * 1_000_000)
+    delta["unpriced_tokens"] = 0
+
+
 def read_latest_rate_limits_from_logs(codex_home: Path) -> dict[str, Any] | None:
     db_path = codex_home / "logs_2.sqlite"
     if not db_path.exists():
@@ -397,6 +612,8 @@ def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -
         return Snapshot(
             primary=previous.primary,
             secondary=previous.secondary,
+            info=previous.info,
+            token_summary=previous.token_summary,
             plan_type=previous.plan_type,
             limit_id=previous.limit_id,
             limit_reached=previous.limit_reached,
@@ -411,6 +628,12 @@ def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -
     return Snapshot(
         primary=primary,
         secondary=secondary,
+        info=token_count.get("info") if isinstance(token_count.get("info"), dict) else None,
+        token_summary=build_token_summary(
+            codex_home,
+            token_count.get("info") if isinstance(token_count.get("info"), dict) else None,
+            secondary,
+        ),
         plan_type=limits.get("plan_type"),
         limit_id=limits.get("limit_id"),
         limit_reached=limit_reached,
@@ -462,27 +685,32 @@ def render(snapshot: Snapshot, use_color: bool) -> str:
     width = shutil.get_terminal_size((88, 24)).columns
     lines = []
     title = "Codex HUD"
-    updated = snapshot.updated_at.strftime("%Y-%m-%d %H:%M:%S")
-    lines.append(colorize(f"{title}  Usage Remaining", "bold", use_color))
+    updated = snapshot.updated_at.strftime("%H:%M:%S")
     if snapshot.source_updated_at:
-        source_text = snapshot.source_updated_at.strftime("%Y-%m-%d %H:%M:%S")
+        source_text = snapshot.source_updated_at.strftime("%H:%M:%S")
         stale_seconds = source_stale_seconds(snapshot)
         if stale_seconds > STALE_AFTER_SECONDS:
             stale_text = format_duration(stale_seconds)
-            lines.append(colorize(f"Updated {updated}  |  Source {source_text}  |  stale for {stale_text}", "yellow", use_color))
+            header = f"{title} | updated {updated} | source {source_text} | stale {stale_text}"
+            lines.append(colorize(header, "yellow", use_color))
         else:
-            lines.append(colorize(f"Updated {updated}  |  Source {source_text}", "dim", use_color))
+            header = f"{title} | updated {updated} | source {source_text}"
+            lines.append(colorize(header, "bold", use_color))
     else:
-        lines.append(colorize(f"Updated {updated}  |  waiting for Codex limit telemetry", "yellow", use_color))
+        header = f"{title} | updated {updated} | waiting for Codex limit telemetry"
+        lines.append(colorize(header, "yellow", use_color))
 
     lines.append("")
+    card_width = card_width_for_terminal(width)
     cards = [
-        limit_card("5 小时使用限额", "滚动窗口", snapshot.primary, weekly=False, use_color=use_color),
-        limit_card("每周使用限额", "订阅周期", snapshot.secondary, weekly=True, use_color=use_color),
+        limit_card("5 小时使用限额", "滚动窗口", snapshot.primary, weekly=False, use_color=use_color, card_width=card_width),
+        limit_card("每周使用限额", "订阅周期", snapshot.secondary, weekly=True, use_color=use_color, card_width=card_width),
     ]
-    cards_width = max(display_width(strip_ansi(line)) for card in cards for line in card)
-    side_by_side = width >= cards_width * 2 + 2
-    lines.extend(render_cards(cards, side_by_side=side_by_side))
+    lines.extend(render_cards(cards))
+    token_lines = token_summary_lines(snapshot.token_summary, width)
+    if token_lines:
+        lines.append("")
+        lines.extend(token_lines)
     lines.append("")
     plan = snapshot.plan_type or "-"
     limit = snapshot.limit_id or "-"
@@ -511,13 +739,99 @@ def remaining_text(window: RateWindow) -> str:
     return f"{remaining:.0f}%"
 
 
-def limit_card(label: str, subtitle: str, window: RateWindow, weekly: bool, use_color: bool) -> list[str]:
-    card_width = 38
+def token_summary_lines(summary: dict[str, Any] | None, width: int) -> list[str]:
+    if not summary:
+        return []
+    today = summary.get("today") or {}
+    yesterday = summary.get("yesterday") or {}
+    current_weekly_limit = summary.get("current_weekly_limit") or {}
+    last_7_days = summary.get("last_7_days") or {}
+    last_30_days = summary.get("last_30_days") or {}
+    lines = []
+    lines.append("Token 汇总")
+    rows = [
+        ("今日", today),
+        ("昨日", yesterday),
+        ("本周限额", current_weekly_limit),
+        ("近 7 天", last_7_days),
+        ("近 30 天", last_30_days),
+    ]
+    widths = even_column_widths(width, 5, gap=2)
+    lines.append(token_summary_header(widths))
+    for label, usage in rows:
+        lines.append(token_summary_line(label, usage, widths))
+    return lines
+
+
+def even_column_widths(total_width: int, count: int, gap: int) -> list[int]:
+    usable_width = max(count, total_width - gap * (count - 1))
+    base, remainder = divmod(usable_width, count)
+    return [base + (1 if index < remainder else 0) for index in range(count)]
+
+
+def token_summary_header(widths: list[int]) -> str:
+    return (
+        f"{fit_display('', widths[0], 'left')}  "
+        f"{fit_display('input', widths[1], 'right')}  "
+        f"{fit_display('output', widths[2], 'right')}  "
+        f"{fit_display('total', widths[3], 'right')}  "
+        f"{fit_display('cost', widths[4], 'right')}"
+    )
+
+
+def token_summary_line(label: str, usage: dict[str, Any], widths: list[int]) -> str:
+    return (
+        f"{fit_display(label, widths[0], 'left')}  "
+        f"{fit_display(format_int(usage.get('input_tokens')), widths[1], 'right')}  "
+        f"{fit_display(format_int(usage.get('output_tokens')), widths[2], 'right')}  "
+        f"{fit_display(format_int(usage.get('total_tokens')), widths[3], 'right')}  "
+        f"{fit_display(format_usd(usage.get('estimated_cost_usd_micros')), widths[4], 'right')}"
+    )
+
+
+def fit_display(text: str, width: int, align: str) -> str:
+    used = display_width(text)
+    if used > width:
+        return truncate_display(text, width)
+    padding = " " * max(0, width - used)
+    return padding + text if align == "right" else text + padding
+
+
+def format_usd(value: Any) -> str:
+    try:
+        micros = int(value or 0)
+    except (TypeError, ValueError):
+        return "-"
+    return f"${micros / 1_000_000:.2f}"
+
+
+def format_int(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def card_width_for_terminal(columns: int) -> int:
+    available = (max(1, columns) - CARD_GAP) // 2
+    return max(MIN_CARD_WIDTH, min(CARD_WIDTH, available))
+
+
+def reset_text_for_card(timestamp: int | None, include_date: bool, width: int) -> str:
+    reset = reset_datetime_text(timestamp, include_date)
+    if display_width(f"重置时间：{reset}") <= width:
+        return reset
+    return reset_datetime_text(timestamp, include_date, compact=True)
+
+
+def limit_card(label: str, subtitle: str, window: RateWindow, weekly: bool, use_color: bool, card_width: int) -> list[str]:
     inner_width = card_width - 4
     if window.used_percent is None:
         usage_line = "已用：未知"
         remaining_line = "剩余：未知"
-        bar_text = bar(None, 22)
+        bar_text = bar(None, max(10, inner_width - 2))
         reset = "-"
         color = "yellow"
     else:
@@ -525,8 +839,8 @@ def limit_card(label: str, subtitle: str, window: RateWindow, weekly: bool, use_
         remaining = max(0.0, min(100.0, 100.0 - window.used_percent))
         usage_line = f"已用：{used:.0f}%"
         remaining_line = f"剩余：{remaining:.0f}%"
-        bar_text = quota_bar(remaining, 22)
-        reset = reset_datetime_text(window.resets_at, weekly)
+        bar_text = quota_bar(remaining, max(10, inner_width - 2))
+        reset = reset_text_for_card(window.resets_at, weekly, inner_width)
         color = remaining_color(remaining)
     raw_lines = [
         f"┌{'─' * (card_width - 2)}┐",
@@ -550,10 +864,9 @@ def limit_card(label: str, subtitle: str, window: RateWindow, weekly: bool, use_
     return colored
 
 
-def render_cards(cards: list[list[str]], side_by_side: bool) -> list[str]:
-    if not side_by_side:
-        return cards[0] + [""] + cards[1]
-    return [f"{left}  {right}" for left, right in zip(cards[0], cards[1])]
+def render_cards(cards: list[list[str]]) -> list[str]:
+    gap = " " * CARD_GAP
+    return [f"{left}{gap}{right}" for left, right in zip(cards[0], cards[1])]
 
 
 def framed_line(text: str, width: int) -> str:
@@ -611,11 +924,13 @@ def remaining_color(remaining: float) -> str:
     return "red"
 
 
-def reset_datetime_text(ts: int | None, include_date: bool) -> str:
+def reset_datetime_text(ts: int | None, include_date: bool, compact: bool = False) -> str:
     if not ts:
         return "-"
     value = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone()
     if include_date:
+        if compact:
+            return f"{value.month}/{value.day} {value:%H:%M}"
         return f"{value.year}年{value.month}月{value.day}日 {value:%H:%M}"
     return value.strftime("%H:%M")
 
@@ -669,6 +984,8 @@ def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
             if snapshot.secondary.used_percent is None
             else max(0.0, min(100.0, 100.0 - snapshot.secondary.used_percent)),
         },
+        "info": snapshot.info,
+        "token_summary": snapshot.token_summary,
         "plan_type": snapshot.plan_type,
         "limit_id": snapshot.limit_id,
         "limit_reached": snapshot.limit_reached,
