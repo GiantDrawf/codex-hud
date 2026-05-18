@@ -14,8 +14,6 @@ import sqlite3
 import sys
 import time
 import unicodedata
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,8 +23,6 @@ DEFAULT_CODEX_HOME = Path.home() / ".codex"
 READ_CHUNK_BYTES = 2_000_000
 MAX_TOKEN_COUNT_SCAN_BYTES = 20_000_000
 STALE_AFTER_SECONDS = 120
-CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/codex/usage"
-CODEX_USAGE_TIMEOUT_SECONDS = 8
 CARD_WIDTH = 38
 CARD_GAP = 1
 MIN_CARD_WIDTH = 24
@@ -36,11 +32,6 @@ TOKEN_PRICE_USD_PER_1M = {
     "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
     "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
 }
-
-
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 @dataclass
@@ -231,10 +222,6 @@ def read_latest_token_count_anywhere(codex_home: Path, session_path: Path | None
         return read_latest_token_count(session_path)
 
     candidates = []
-    account_usage = read_latest_rate_limits_from_account(codex_home)
-    if account_usage and account_usage.get("rate_limits"):
-        candidates.append(account_usage)
-
     log_token_count = read_latest_rate_limits_from_logs(codex_home)
     if log_token_count and log_token_count.get("rate_limits"):
         candidates.append(log_token_count)
@@ -507,90 +494,6 @@ def read_latest_rate_limits_from_logs(codex_home: Path) -> dict[str, Any] | None
             "_codex_hud_source_updated_at": dt.datetime.fromtimestamp(ts).astimezone(),
         }
     return None
-
-
-def read_latest_rate_limits_from_account(codex_home: Path) -> dict[str, Any] | None:
-    token = read_codex_access_token(codex_home)
-    if not token:
-        return None
-    request = urllib.request.Request(
-        CODEX_USAGE_ENDPOINT,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "codex-hud",
-        },
-    )
-    try:
-        opener = urllib.request.build_opener(NoRedirectHandler)
-        with opener.open(request, timeout=CODEX_USAGE_TIMEOUT_SECONDS) as response:
-            body = response.read().decode("utf-8")
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
-        return None
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    rate_limits = normalize_account_usage(data)
-    if not rate_limits:
-        return None
-    return {
-        "type": "token_count",
-        "rate_limits": rate_limits,
-        "_codex_hud_source_updated_at": dt.datetime.now().astimezone(),
-    }
-
-
-def read_codex_access_token(codex_home: Path) -> str | None:
-    auth_path = codex_home / "auth.json"
-    try:
-        with auth_path.open("r", encoding="utf-8") as handle:
-            auth = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return None
-    tokens = auth.get("tokens") if isinstance(auth, dict) else None
-    token = tokens.get("access_token") if isinstance(tokens, dict) else None
-    return token if isinstance(token, str) and token else None
-
-
-def normalize_account_usage(data: dict[str, Any]) -> dict[str, Any] | None:
-    rate_limit = data.get("rate_limit") if isinstance(data, dict) else None
-    if not isinstance(rate_limit, dict):
-        return None
-    primary = normalize_account_window(rate_limit.get("primary_window"))
-    secondary = normalize_account_window(rate_limit.get("secondary_window"))
-    if not primary and not secondary:
-        return None
-    reached_type = data.get("rate_limit_reached_type") or limit_reached_type({"rate_limits": rate_limit})
-    return {
-        "primary": primary,
-        "secondary": secondary,
-        "plan_type": data.get("plan_type"),
-        "limit_id": "codex",
-        "rate_limit_reached_type": reached_type,
-    }
-
-
-def normalize_account_window(window: Any) -> dict[str, Any]:
-    if not isinstance(window, dict):
-        return {}
-    reset_at = window.get("reset_at")
-    if reset_at is None and window.get("reset_after_seconds") is not None:
-        try:
-            reset_at = int(time.time()) + int(window["reset_after_seconds"])
-        except (TypeError, ValueError):
-            reset_at = None
-    window_seconds = window.get("limit_window_seconds")
-    try:
-        window_minutes = int(window_seconds) // 60 if window_seconds is not None else None
-    except (TypeError, ValueError):
-        window_minutes = None
-    return {
-        "used_percent": window.get("used_percent"),
-        "remaining_percent": window.get("remaining_percent"),
-        "window_minutes": window_minutes,
-        "resets_at": reset_at,
-    }
 
 
 def extract_rate_limits_event(body: str) -> dict[str, Any] | None:

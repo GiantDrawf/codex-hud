@@ -20,9 +20,8 @@ This plugin provides a local terminal dashboard for remaining Codex subscription
 
 ## What It Reads
 
-- `https://chatgpt.com/backend-api/codex/usage`: same account usage endpoint Codex CLI uses for `/status`.
-- `~/.codex/sessions/**/rollout-*.jsonl`: fallback native `token_count.rate_limits` events.
-- `~/.codex/logs_2.sqlite`: fallback recent local `codex.rate_limits` websocket events.
+- `~/.codex/sessions/**/rollout-*.jsonl`: native `token_count.rate_limits` events.
+- `~/.codex/logs_2.sqlite`: recent local `codex.rate_limits` websocket events.
 - `~/.codex/state_5.sqlite`: fallback source for locating the latest rollout file.
 
 Live rendering is handled by Ink. Data collection remains in the Python backend exposed via `codex_hud.py --once --json`.

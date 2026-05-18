@@ -4,9 +4,7 @@ English | [简体中文](./README.zh-CN.md)
 
 Codex HUD is a local terminal dashboard for remaining Codex CLI subscription limits.
 
-It is inspired by `claude-hud`, but it does not patch Codex CLI. For account
-limits it reads the same ChatGPT account usage endpoint used by Codex CLI
-`/status`, then falls back to local telemetry files written by Codex CLI.
+It is inspired by `claude-hud`, but it does not patch Codex CLI and does not call the ChatGPT analytics API. It reads local telemetry files written by Codex CLI.
 
 Live mode is rendered with [Ink](https://github.com/vadimdemedes/ink), a React renderer for command-line apps. The local telemetry reader remains in Python and is exposed through `codex_hud.py --once --json`.
 
@@ -119,19 +117,11 @@ chmod +x ~/plugins/codex-hud/scripts/codex-hud ~/plugins/codex-hud/scripts/codex
 
 Codex HUD reads:
 
-- `https://chatgpt.com/backend-api/codex/usage`
 - `~/.codex/sessions/**/rollout-*.jsonl`
 - `~/.codex/logs_2.sqlite`
 - `~/.codex/state_5.sqlite`
 
-The primary limit data comes from the ChatGPT account usage endpoint. The
-request is an authenticated GET with no request body, uses the Codex CLI
-`~/.codex/auth.json` access token, and disables redirects so the Authorization
-header is not forwarded away from `chatgpt.com`.
-
-Local `codex.rate_limits` and `token_count.rate_limits` telemetry events are
-fallback sources. `state_5.sqlite` is used only as a fallback to locate the
-latest rollout file.
+The primary data comes from local `codex.rate_limits` and `token_count.rate_limits` telemetry events. `state_5.sqlite` is used only as a fallback to locate the latest rollout file.
 
 Token summaries are computed from per-session `total_token_usage` deltas, so
 duplicate telemetry events are not counted twice. Cost estimates use the
@@ -143,27 +133,21 @@ totals but excluded from the cost column.
 
 This HUD does not poll the official analytics page.
 
-It asks the same account usage endpoint as Codex CLI `/status`, then falls back
-to the latest account-level limit snapshot that any local Codex CLI session
-wrote to telemetry. As a result:
+It shows the latest account-level limit snapshot that any local Codex CLI session wrote to telemetry. As a result:
 
-- If the account usage endpoint is unavailable, the HUD may show stale local telemetry.
+- If no local Codex CLI session has produced a new model response, the HUD may not change.
+- The official analytics page may show server-side updates earlier than this local HUD.
+- Usage from the web app, another device, or another Codex account may appear only after a local Codex CLI session receives new telemetry.
 - Live mode keeps the last valid snapshot if a refresh temporarily cannot read telemetry.
 - If the last source snapshot is older than 2 minutes, the header marks it as stale.
 
-`Updated` is the time the HUD rendered. `Source` is the timestamp of the account
-usage response or the fallback local Codex telemetry snapshot.
+`Updated` is the time the HUD rendered. `Source` is the timestamp of the local Codex telemetry snapshot. If Codex CLI is not running locally, `Updated` can keep changing while `Source` stays fixed; in that case the percentages are historical local telemetry, not a live server-side balance.
 
 ## Safety
 
-Codex HUD reads the Codex CLI ChatGPT access token from `~/.codex/auth.json`
-only to authenticate the official account usage request to `chatgpt.com`.
+Codex HUD does not read or upload API keys, cookies, authorization headers, or other account credentials.
 
-Security review recorded on 2026-05-18: the usage request sends no local project
-files, session transcripts, rollout contents, logs, cookies, API keys, or token
-values in the request body. The token is placed only in the Authorization header
-for `https://chatgpt.com/backend-api/codex/usage`, is not printed, is not cached
-by Codex HUD, and is not forwarded through redirects.
+It only reads local Codex CLI telemetry files and renders results in your terminal. It makes no network requests.
 
 The runtime npm dependencies (`ink` and `react`) are used only for terminal rendering.
 
