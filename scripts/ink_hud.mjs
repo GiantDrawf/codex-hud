@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import React, {useCallback, useEffect, useState} from 'react';
-import {Box, Text, render, useApp, useInput, useStdin, useStdout} from 'ink';
+import {Box, Text, render, useInput, useStdin, useStdout} from 'ink';
 import {execFile} from 'node:child_process';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import path from 'node:path';
@@ -66,6 +66,39 @@ function loadSnapshot(backendArgs) {
 			}
 		);
 	});
+}
+
+function setSubscriptionStart(backendArgs, date) {
+	return new Promise((resolve, reject) => {
+		execFile(
+			'python3',
+			[pythonBackend, 'subscription', ...codexHomeArgs(backendArgs), 'set-start', date],
+			{timeout: 5000, maxBuffer: 1024 * 1024},
+			(error, stdout, stderr) => {
+				if (error) {
+					reject(new Error((stderr || error.message).trim()));
+					return;
+				}
+				resolve(stdout.trim());
+			}
+		);
+	});
+}
+
+function codexHomeArgs(backendArgs) {
+	const result = [];
+	for (let index = 0; index < backendArgs.length; index += 1) {
+		const arg = backendArgs[index];
+		if (arg === '--codex-home' && backendArgs[index + 1]) {
+			result.push(arg, backendArgs[index + 1]);
+			index += 1;
+			continue;
+		}
+		if (arg.startsWith('--codex-home=')) {
+			result.push(arg);
+		}
+	}
+	return result;
 }
 
 function percent(value, digits = 0) {
@@ -133,8 +166,30 @@ function tokenSummaryRows(summary) {
 		['昨日', summary.yesterday || {}],
 		['本周限额', summary.current_weekly_limit || {}],
 		['近 7 天', summary.last_7_days || {}],
-		['近 30 天', summary.last_30_days || {}]
+		['当前账期', summary.current_subscription_period || {}]
 	];
+}
+
+function subscriptionPeriodDisplay(period) {
+	if (period?.display) {
+		return period.display;
+	}
+	if (!period?.start || !period?.end) {
+		return '-';
+	}
+	const start = new Date(`${period.start}T00:00:00`);
+	const end = new Date(`${period.end}T00:00:00`);
+	if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+		return '-';
+	}
+	end.setDate(end.getDate() - 1);
+	return `${formatDate(start)}-${formatDate(end)}`;
+}
+
+function formatDate(value) {
+	const month = String(value.getMonth() + 1).padStart(2, '0');
+	const day = String(value.getDate()).padStart(2, '0');
+	return `${value.getFullYear()}/${month}/${day}`;
 }
 
 function evenColumnWidths(totalWidth, count, gap) {
@@ -287,6 +342,17 @@ function shortTime(value) {
 	return new Date(value).toLocaleTimeString();
 }
 
+function currentDateInputValue(snapshot) {
+	const raw = snapshot?.subscription_period?.start || snapshot?.subscription_period?.configured_start;
+	if (/^\d{4}-\d{2}-\d{2}$/.test(raw || '')) {
+		return raw;
+	}
+	const now = new Date();
+	const month = String(now.getMonth() + 1).padStart(2, '0');
+	const day = String(now.getDate()).padStart(2, '0');
+	return `${now.getFullYear()}-${month}-${day}`;
+}
+
 function titleLine(snapshot, updated, error) {
 	const status = error || `updated ${updated} | ${freshness(snapshot)}`;
 	return `Codex HUD | ${status}`;
@@ -328,20 +394,48 @@ function TokenSummary({summary, width}) {
 }
 
 function Hud({args}) {
-	const {exit} = useApp();
 	const {isRawModeSupported} = useStdin();
 	const {stdout} = useStdout();
 	const [snapshot, setSnapshot] = useState(null);
 	const [error, setError] = useState(null);
 	const [bossMode, setBossMode] = useState(false);
+	const [periodInputActive, setPeriodInputActive] = useState(false);
+	const [periodInput, setPeriodInput] = useState('');
+	const [periodMessage, setPeriodMessage] = useState(null);
 
 	useInput((input, key) => {
-		if (input === 'q' || key.escape) {
-			exit();
+		if (periodInputActive) {
+			if (key.return) {
+				setPeriodInputActive(false);
+				setSubscriptionStart(args.backendArgs, periodInput)
+					.then(message => {
+						setPeriodMessage(message || 'subscription period updated');
+						return refresh();
+					})
+					.catch(saveError => setPeriodMessage(saveError.message));
+				return;
+			}
+			if (key.escape) {
+				setPeriodInputActive(false);
+				setPeriodMessage(null);
+				return;
+			}
+			if (key.backspace || key.delete) {
+				setPeriodInput(value => value.slice(0, -1));
+				return;
+			}
+			if (/^[0-9-]$/.test(input) && periodInput.length < 10) {
+				setPeriodInput(value => `${value}${input}`);
+			}
 			return;
 		}
 		if (input === 'b' || input === 'B') {
 			setBossMode(value => !value);
+		}
+		if (input === 'p' || input === 'P') {
+			setPeriodInput(currentDateInputValue(snapshot));
+			setPeriodInputActive(true);
+			setPeriodMessage(null);
 		}
 	}, {isActive: Boolean(isRawModeSupported)});
 
@@ -351,15 +445,15 @@ function Hud({args}) {
 			setSnapshot(previous => mergeSnapshot(next, previous));
 			setError(null);
 			if (args.inkOnce) {
-				setTimeout(exit, 50);
+				setTimeout(() => process.exit(0), 50);
 			}
 		} catch (loadError) {
 			setError(loadError.message);
 			if (args.inkOnce) {
-				setTimeout(exit, 50);
+				setTimeout(() => process.exit(0), 50);
 			}
 		}
-	}, [args.backendArgs, args.inkOnce, exit]);
+	}, [args.backendArgs, args.inkOnce]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -398,7 +492,9 @@ function Hud({args}) {
 		snapshot?.token_summary && h(Box, {height: 1}),
 		snapshot?.token_summary && h(TokenSummary, {summary: snapshot.token_summary, width: stdout?.columns || 80}),
 		snapshot && h(Box, {height: 1}),
-		snapshot && h(Text, {dimColor: true}, `Plan: ${snapshot.plan_type || '-'} | limit: ${snapshot.limit_id || '-'} | reached: ${snapshot.limit_reached || 'no'} | q to quit`)
+		snapshot && h(Text, {dimColor: true}, `period: ${subscriptionPeriodDisplay(snapshot.subscription_period)} | p 设置账期`),
+		periodInputActive && h(Text, {color: bossMode ? undefined : 'cyan'}, `当前账期开始日 YYYY-MM-DD: ${periodInput}`),
+		periodMessage && !periodInputActive && h(Text, {color: bossMode ? undefined : 'yellow'}, periodMessage)
 	);
 }
 

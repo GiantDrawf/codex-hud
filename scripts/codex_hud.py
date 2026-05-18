@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import datetime as dt
 import glob
 import json
@@ -27,6 +28,7 @@ CARD_WIDTH = 38
 CARD_GAP = 1
 MIN_CARD_WIDTH = 24
 TOKEN_SUMMARY_DAYS = 30
+SUBSCRIPTION_CONFIG_NAME = "codex-hud-subscription.json"
 TOKEN_PRICE_USD_PER_1M = {
     "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
     "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
@@ -47,6 +49,7 @@ class Snapshot:
     secondary: RateWindow
     info: dict[str, Any] | None
     token_summary: dict[str, Any] | None
+    subscription_period: dict[str, Any] | None
     plan_type: str | None
     limit_id: str | None
     limit_reached: str | None
@@ -67,6 +70,81 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tmux-line", action="store_true", help="Deprecated alias for --status-line")
     parser.add_argument("--no-clear", action="store_true", help="Compatibility flag for status-line integrations")
     return parser.parse_args()
+
+
+def subscription_config_path(codex_home: Path) -> Path:
+    return codex_home.expanduser() / SUBSCRIPTION_CONFIG_NAME
+
+
+def parse_local_date(value: str) -> dt.date:
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("date must use YYYY-MM-DD") from exc
+
+
+def read_subscription_config(codex_home: Path) -> dict[str, Any] | None:
+    path = subscription_config_path(codex_home)
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_subscription_config(codex_home: Path, data: dict[str, Any]) -> None:
+    path = subscription_config_path(codex_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def add_months(anchor: dt.date, months: int) -> dt.date:
+    month_index = anchor.month - 1 + months
+    year = anchor.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(anchor.day, calendar.monthrange(year, month)[1])
+    return dt.date(year, month, day)
+
+
+def current_subscription_period(codex_home: Path, now: dt.datetime | None = None) -> dict[str, Any] | None:
+    config = read_subscription_config(codex_home)
+    if not config:
+        return None
+    raw_start = config.get("current_period_start") or config.get("start")
+    if not isinstance(raw_start, str):
+        return None
+    try:
+        anchor = parse_local_date(raw_start)
+    except ValueError:
+        return None
+    today = (now or dt.datetime.now().astimezone()).date()
+    if anchor > today:
+        start = anchor
+        end = add_months(anchor, 1)
+    else:
+        months = (today.year - anchor.year) * 12 + today.month - anchor.month
+        start = add_months(anchor, months)
+        if start > today:
+            months -= 1
+            start = add_months(anchor, months)
+        while add_months(anchor, months + 1) <= today:
+            months += 1
+            start = add_months(anchor, months)
+        end = add_months(anchor, months + 1)
+    display_end = end - dt.timedelta(days=1)
+    return {
+        "source": "manual",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "display": f"{start:%Y/%m/%d}-{display_end:%Y/%m/%d}",
+        "next_period_start": end.isoformat(),
+        "configured_start": anchor.isoformat(),
+    }
 
 
 def newest_session(codex_home: Path) -> Path | None:
@@ -258,6 +336,7 @@ def build_token_summary(
     codex_home: Path,
     latest_info: dict[str, Any] | None,
     weekly_window: RateWindow,
+    subscription_period: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     today = dt.datetime.now().astimezone().date()
     yesterday = today - dt.timedelta(days=1)
@@ -265,10 +344,14 @@ def build_token_summary(
     weekly_period = period_from_window(weekly_window)
     if weekly_period and weekly_period[0].date() < start_date:
         start_date = weekly_period[0].date()
+    subscription_datetime_period = datetime_period_from_dates(subscription_period)
+    if subscription_datetime_period and subscription_datetime_period[0].date() < start_date:
+        start_date = subscription_datetime_period[0].date()
     totals = {
         "today": empty_token_usage(),
         "yesterday": empty_token_usage(),
         "current_weekly_limit": empty_token_usage(),
+        "current_subscription_period": empty_token_usage(),
         "last_7_days": empty_token_usage(),
         "last_30_days": empty_token_usage(),
     }
@@ -284,7 +367,15 @@ def build_token_summary(
         except OSError:
             continue
         scanned_files += 1
-        event_count += add_session_token_usage(path, start_date, today, yesterday, weekly_period, totals)
+        event_count += add_session_token_usage(
+            path,
+            start_date,
+            today,
+            yesterday,
+            weekly_period,
+            subscription_datetime_period,
+            totals,
+        )
 
     context_window = None
     if latest_info:
@@ -295,10 +386,11 @@ def build_token_summary(
         "today": totals["today"],
         "yesterday": totals["yesterday"],
         "current_weekly_limit": totals["current_weekly_limit"],
+        "current_subscription_period": totals["current_subscription_period"],
         "last_7_days": totals["last_7_days"],
         "last_30_days": totals["last_30_days"],
         "current_weekly_limit_period": period_to_json(weekly_period),
-        "plus_subscription_period": None,
+        "plus_subscription_period": subscription_period,
         "context_window": context_window,
         "days": TOKEN_SUMMARY_DAYS,
         "scanned_files": scanned_files,
@@ -324,6 +416,7 @@ def add_session_token_usage(
     today: dt.date,
     yesterday: dt.date,
     weekly_period: tuple[dt.datetime, dt.datetime] | None,
+    subscription_period: tuple[dt.datetime, dt.datetime] | None,
     totals: dict[str, dict[str, int]],
 ) -> int:
     previous: dict[str, int] | None = None
@@ -360,6 +453,8 @@ def add_session_token_usage(
                     add_token_usage(totals["last_7_days"], delta)
                 if timestamp_in_period(timestamp, weekly_period):
                     add_token_usage(totals["current_weekly_limit"], delta)
+                if timestamp_in_period(timestamp, subscription_period):
+                    add_token_usage(totals["current_subscription_period"], delta)
                 if event_date == today:
                     add_token_usage(totals["today"], delta)
                 elif event_date == yesterday:
@@ -386,6 +481,21 @@ def period_to_json(period: tuple[dt.datetime, dt.datetime] | None) -> dict[str, 
         "start": start.isoformat(),
         "end": end.isoformat(),
     }
+
+
+def datetime_period_from_dates(period: dict[str, Any] | None) -> tuple[dt.datetime, dt.datetime] | None:
+    if not period:
+        return None
+    start_raw = period.get("start")
+    end_raw = period.get("end")
+    if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+        return None
+    try:
+        start = dt.datetime.combine(parse_local_date(start_raw), dt.time.min).astimezone()
+        end = dt.datetime.combine(parse_local_date(end_raw), dt.time.min).astimezone()
+    except ValueError:
+        return None
+    return start, end
 
 
 def timestamp_in_period(timestamp: dt.datetime, period: tuple[dt.datetime, dt.datetime] | None) -> bool:
@@ -606,14 +716,17 @@ def infer_reached_window(raw_limits: dict[str, Any]) -> str | None:
 def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -> Snapshot:
     codex_home = args.codex_home.expanduser()
     session_path = args.session.expanduser() if args.session else None
+    subscription_period = current_subscription_period(codex_home)
     token_count = read_latest_token_count_anywhere(codex_home, session_path)
-    limits = (token_count or {}).get("rate_limits") or {}
+    token_count_data = token_count or {}
+    limits = token_count_data.get("rate_limits") or {}
     if not limits and previous:
         return Snapshot(
             primary=previous.primary,
             secondary=previous.secondary,
             info=previous.info,
             token_summary=previous.token_summary,
+            subscription_period=previous.subscription_period,
             plan_type=previous.plan_type,
             limit_id=previous.limit_id,
             limit_reached=previous.limit_reached,
@@ -628,17 +741,19 @@ def build_snapshot(args: argparse.Namespace, previous: Snapshot | None = None) -
     return Snapshot(
         primary=primary,
         secondary=secondary,
-        info=token_count.get("info") if isinstance(token_count.get("info"), dict) else None,
+        info=token_count_data.get("info") if isinstance(token_count_data.get("info"), dict) else None,
         token_summary=build_token_summary(
             codex_home,
-            token_count.get("info") if isinstance(token_count.get("info"), dict) else None,
+            token_count_data.get("info") if isinstance(token_count_data.get("info"), dict) else None,
             secondary,
+            subscription_period,
         ),
+        subscription_period=subscription_period,
         plan_type=limits.get("plan_type"),
         limit_id=limits.get("limit_id"),
         limit_reached=limit_reached,
         updated_at=dt.datetime.now(),
-        source_updated_at=token_count.get("_codex_hud_source_updated_at") if limits else None,
+        source_updated_at=token_count_data.get("_codex_hud_source_updated_at") if limits else None,
         available=bool(limits),
     )
 
@@ -712,10 +827,8 @@ def render(snapshot: Snapshot, use_color: bool) -> str:
         lines.append("")
         lines.extend(token_lines)
     lines.append("")
-    plan = snapshot.plan_type or "-"
-    limit = snapshot.limit_id or "-"
-    reached = snapshot.limit_reached or "no"
-    lines.append(colorize(f"Plan: {plan} | limit: {limit} | reached: {reached}", "dim", use_color))
+    period = subscription_period_display(snapshot.subscription_period)
+    lines.append(colorize(f"period: {period}", "dim", use_color))
 
     return "\n".join(lines)
 
@@ -728,7 +841,8 @@ def render_status_line(snapshot: Snapshot) -> str:
     freshness = status_freshness_text(snapshot)
     return (
         f"HUD{freshness} • 5h {primary_remaining} left reset {primary_reset} "
-        f"• weekly {secondary_remaining} left reset {secondary_reset}"
+        f"• weekly {secondary_remaining} left reset {secondary_reset} "
+        f"• period {subscription_period_display(snapshot.subscription_period)}"
     )
 
 
@@ -745,8 +859,8 @@ def token_summary_lines(summary: dict[str, Any] | None, width: int) -> list[str]
     today = summary.get("today") or {}
     yesterday = summary.get("yesterday") or {}
     current_weekly_limit = summary.get("current_weekly_limit") or {}
+    current_subscription_period = summary.get("current_subscription_period") or {}
     last_7_days = summary.get("last_7_days") or {}
-    last_30_days = summary.get("last_30_days") or {}
     lines = []
     lines.append("Token 汇总")
     rows = [
@@ -754,7 +868,7 @@ def token_summary_lines(summary: dict[str, Any] | None, width: int) -> list[str]
         ("昨日", yesterday),
         ("本周限额", current_weekly_limit),
         ("近 7 天", last_7_days),
-        ("近 30 天", last_30_days),
+        ("当前账期", current_subscription_period),
     ]
     widths = even_column_widths(width, 5, gap=2)
     lines.append(token_summary_header(widths))
@@ -942,6 +1056,23 @@ def reset_is_not_today(ts: int | None) -> bool:
     return value.date() != dt.datetime.now().astimezone().date()
 
 
+def subscription_period_display(period: dict[str, Any] | None) -> str:
+    if not period:
+        return "-"
+    display = period.get("display")
+    if isinstance(display, str) and display:
+        return display
+    start = period.get("start")
+    end = period.get("end")
+    if not isinstance(start, str) or not isinstance(end, str):
+        return "-"
+    try:
+        display_end = parse_local_date(end) - dt.timedelta(days=1)
+        return f"{parse_local_date(start):%Y/%m/%d}-{display_end:%Y/%m/%d}"
+    except ValueError:
+        return "-"
+
+
 def format_duration(seconds: int) -> str:
     minutes = seconds // 60
     if minutes < 60:
@@ -964,7 +1095,7 @@ def is_stale(snapshot: Snapshot) -> bool:
 def status_freshness_text(snapshot: Snapshot) -> str:
     stale_seconds = source_stale_seconds(snapshot)
     if stale_seconds is None:
-        return " stale ?"
+        return " waiting"
     if stale_seconds <= STALE_AFTER_SECONDS:
         return ""
     return f" stale {format_duration(stale_seconds)}"
@@ -986,6 +1117,7 @@ def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
         },
         "info": snapshot.info,
         "token_summary": snapshot.token_summary,
+        "subscription_period": snapshot.subscription_period,
         "plan_type": snapshot.plan_type,
         "limit_id": snapshot.limit_id,
         "limit_reached": snapshot.limit_reached,
@@ -998,7 +1130,67 @@ def snapshot_to_json(snapshot: Snapshot) -> dict[str, Any]:
     }
 
 
+def handle_subscription_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Manage Codex HUD subscription period")
+    parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    set_parser = subparsers.add_parser("set-start", help="Set the current subscription period start date")
+    set_parser.add_argument("date", help="Current period start date, YYYY-MM-DD")
+
+    subparsers.add_parser("show", help="Show the current subscription period")
+    subparsers.add_parser("clear", help="Clear the manual subscription period")
+
+    args = parser.parse_args(argv)
+    codex_home = args.codex_home.expanduser()
+
+    if args.command == "set-start":
+        try:
+            start = parse_local_date(args.date)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if start > dt.datetime.now().astimezone().date():
+            print("date must not be in the future", file=sys.stderr)
+            return 2
+        config = {
+            "source": "manual",
+            "cycle": "monthly",
+            "current_period_start": start.isoformat(),
+            "updated_at": dt.datetime.now().astimezone().isoformat(),
+        }
+        write_subscription_config(codex_home, config)
+        period = current_subscription_period(codex_home)
+        print(f"subscription period set: {subscription_period_display(period)}")
+        return 0
+
+    if args.command == "show":
+        period = current_subscription_period(codex_home)
+        if not period:
+            print("subscription period: -")
+            return 0
+        print(f"subscription period: {subscription_period_display(period)}")
+        print(f"configured start: {period.get('configured_start', '-')}")
+        return 0
+
+    if args.command == "clear":
+        path = subscription_config_path(codex_home)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print("subscription period cleared")
+        return 0
+
+    return 2
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "subscription":
+        return handle_subscription_cli(sys.argv[2:])
     args = parse_args()
     use_color = not args.no_color and sys.stdout.isatty()
     snapshot = build_snapshot(args)

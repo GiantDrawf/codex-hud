@@ -17,12 +17,15 @@ This plugin provides a local terminal dashboard for remaining Codex subscription
   `~/plugins/codex-hud/scripts/codex-hud --status-line --once --no-clear`
 - JSON output:
   `~/plugins/codex-hud/scripts/codex-hud --once --json`
+- Manual monthly subscription period:
+  `~/plugins/codex-hud/scripts/codex-hud subscription set-start YYYY-MM-DD`
 
 ## What It Reads
 
 - `~/.codex/sessions/**/rollout-*.jsonl`: native `token_count.rate_limits` events.
 - `~/.codex/logs_2.sqlite`: recent local `codex.rate_limits` websocket events.
 - `~/.codex/state_5.sqlite`: fallback source for locating the latest rollout file.
+- `~/.codex/codex-hud-subscription.json`: optional manual monthly subscription period start date.
 
 Live rendering is handled by Ink. Data collection remains in the Python backend exposed via `codex_hud.py --once --json`.
 

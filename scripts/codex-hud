@@ -2,6 +2,12 @@
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WATCH=1
 
+case "$1" in
+	subscription)
+		exec python3 "$SCRIPT_DIR/codex_hud.py" "$@"
+		;;
+esac
+
 for arg in "$@"; do
 	case "$arg" in
 		--once|--json|--status-line|--tmux-line)

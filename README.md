@@ -93,6 +93,18 @@ codex-hud --status-line --once --no-clear
 
 When the source telemetry is older than 2 minutes, status-line output includes a `stale` marker.
 
+Set a manual subscription period start date:
+
+```bash
+codex-hud subscription set-start 2026-05-12
+codex-hud subscription show
+codex-hud subscription clear
+```
+
+The HUD rolls the monthly period forward automatically, shows current-period usage in the token summary, and prints the first and last displayed period days as `YYYY/MM/DD-YYYY/MM/DD` in the footer. Internally, usage is counted with the next period start as the exclusive end boundary.
+
+In the live HUD, press `p`, enter `YYYY-MM-DD`, then press Enter to save the current period start date. Press Esc to cancel.
+
 ## Install Alias
 
 Add this to `~/.zshrc` or `~/.bashrc`:
@@ -128,6 +140,10 @@ duplicate telemetry events are not counted twice. Cost estimates use the
 published OpenAI API per-token prices for known models and account for cached
 input separately. Tokens from models without a known price are included in token
 totals but excluded from the cost column.
+
+Manual subscription period settings are stored in `~/.codex/codex-hud-subscription.json`.
+OpenAI local telemetry does not currently expose a reliable monthly subscription
+period, so this field is based on the manual setting.
 
 ## Freshness
 
